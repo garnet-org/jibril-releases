@@ -1,8 +1,15 @@
 # Jibril Releases
 
-<p align="center">
-<img width="429" height="285" src="https://github.com/user-attachments/assets/fa002dfb-73a7-434a-8f4a-a9ec69d3955b"><br>
-Jibril releases (automated).<br>
-<a href="https://jibril.garnet.ai/">Read the project documentation</a><br>
-<a href="https://discord.gg/44vSshRqab">Join our Discord</a>
-</p>
+Release channel for Jibril, the Linux eBPF runtime sensor built and maintained
+by Garnet Labs Inc. Binary distribution only; source is not public.
+
+[`garnet-org/action`](https://github.com/garnet-org/action) pins and downloads
+Jibril from this repository and runs it as a systemd service on supported
+Linux runners.
+
+## License
+
+Copyright © 2025–2026 Garnet Labs Inc.
+
+Released binaries are licensed under the terms in [LICENSE.md](./LICENSE.md).
+Embedded components remain subject to their respective licenses.
