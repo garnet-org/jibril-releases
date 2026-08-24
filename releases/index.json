@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "releases": [
+    {
+      "tag": "v2.17.0-rc.5",
+      "platforms": [
+        "linux-x86_64"
+      ],
+      "release": "releases/v2.17.0-rc.5/release.json",
+      "checksums": "releases/v2.17.0-rc.5/SHA256SUMS"
+    }
+  ]
+}
