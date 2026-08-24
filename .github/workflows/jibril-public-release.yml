@@ -1,0 +1,159 @@
+name: Release Jibril
+
+#
+# A maintainer starts this workflow manually with one release label, for
+# example v2.17.0-rc.5. Before the run starts, the repository must contain:
+#
+#   releases/<label>/release.json
+#   releases/<label>/SHA256SUMS-handoff
+#   releases/index.json
+#
+# The matching draft release must contain exactly:
+#
+#   jibril-<label>-linux-x86_64.handoff.tar.gz
+#   SHA256SUMS
+#
+# The handoff must contain exactly:
+#
+#   jibril
+#   jibril-checksums.txt
+#   release.json
+#
+# After every trust check passes, the workflow publishes exactly:
+#
+#   jibril
+#   jibril-<label>-linux-x86_64.tar.gz
+#   SHA256SUMS
+#
+# The public TAR contains the three handoff payload files and one keyless
+# Sigstore/Cosign bundle for each payload file.
+# GitHub artifact attestations cover all six TAR members plus the
+# direct binary, final TAR, and final SHA256SUMS.
+# The final SHA256SUMS covers all downloadable payloads.
+on:
+  workflow_dispatch:
+    inputs:
+      release:
+        description: Release label to publish, for example v2.17.0-rc.5
+        required: true
+        type: string
+
+# Jobs and third-party actions receive no implicit permissions.
+permissions: {}
+
+concurrency:
+  group: public-jibril-release-${{ inputs.release }}
+  cancel-in-progress: false
+
+jobs:
+  public_release:
+    name: Publish ${{ inputs.release }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+
+    # Restricted environment with required maintainers.
+    environment: release
+
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+
+    env:
+      INPUT_RELEASE: ${{ inputs.release }}
+
+      EXPECTED_DRAFT_AUTHOR_ID: ${{ vars.PRIVATE_RELEASE_DISPATCHER_ID }}
+
+      PUBLIC_PREDICATE_TYPE: https://github.com/garnet-org/jibril-releases/attestations/release/v1
+      COSIGN_CERTIFICATE_IDENTITY: https://github.com/${{ github.workflow_ref }}
+      COSIGN_OIDC_ISSUER: https://token.actions.githubusercontent.com
+
+    steps:
+      - name: Validate the manual request and protected workflow identity
+        id: release_info
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$GITHUB_EVENT_NAME" != "workflow_dispatch" ]]; then
+            echo "Unexpected public release workflow context." >&2
+            exit 1
+          fi
+
+          expected_input_keys=release
+          actual_input_keys="$(jq -r '.inputs | keys[]' \
+            "$GITHUB_EVENT_PATH" | LC_ALL=C sort)"
+          if [[ "$actual_input_keys" != "$expected_input_keys" ]]; then
+            echo "The manual request must contain exactly the release input." >&2
+            exit 1
+          fi
+
+          if [[ ! "$INPUT_RELEASE" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]]; then
+            echo "Invalid SemVer release label: $INPUT_RELEASE" >&2
+            exit 1
+          fi
+
+          : "${EXPECTED_DRAFT_AUTHOR_ID:?Set PRIVATE_RELEASE_DISPATCHER_ID to the owner of the private release}"
+          if [[ ! "$EXPECTED_DRAFT_AUTHOR_ID" =~ ^[1-9][0-9]*$ ]]; then
+            echo "PRIVATE_RELEASE_DISPATCHER_ID must be a numeric GitHub user ID." >&2
+            exit 1
+          fi
+
+          default_branch="$(gh api \
+            --header 'Accept: application/vnd.github+json' \
+            --header 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/${GITHUB_REPOSITORY}" \
+            --jq '.default_branch')"
+          expected_ref="refs/heads/${default_branch}"
+          expected_workflow_ref="${GITHUB_REPOSITORY}/.github/workflows/jibril-public-release.yml@${expected_ref}"
+          # Ensure workflow runs from the default protected branch.
+          if [[ "$GITHUB_REF" != "$expected_ref" ||
+            "$GITHUB_WORKFLOW_REF" != "$expected_workflow_ref" ||
+            ! "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "The run must use the protected public workflow from the default branch." >&2
+            exit 1
+          fi
+
+          default_head="$(gh api \
+            --header 'Accept: application/vnd.github+json' \
+            --header 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/${GITHUB_REPOSITORY}/commits/${default_branch}" \
+            --jq '.sha')"
+          compare_status="$(gh api \
+            --header 'Accept: application/vnd.github+json' \
+            --header 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/${GITHUB_REPOSITORY}/compare/${GITHUB_SHA}...${default_head}" \
+            --jq '.status')"
+          # Ensure the workflow commit is part of the default protected branch.
+          if [[ "$compare_status" != "identical" &&
+            "$compare_status" != "ahead" ]]; then
+            echo "The workflow commit is no longer on the protected default-branch history." >&2
+            exit 1
+          fi
+
+          handoff_name="jibril-${INPUT_RELEASE}-linux-x86_64.handoff.tar.gz"
+          tar_name="jibril-${INPUT_RELEASE}-linux-x86_64.tar.gz"
+          is_prerelease=false
+          if [[ "$INPUT_RELEASE" =~ ^v[0-9]+\.[0-9]+\.[0-9]+- ]]; then
+            is_prerelease=true
+          fi
+
+          {
+            echo "label=$INPUT_RELEASE"
+            echo "defaultBranch=$default_branch"
+            echo "handoffName=$handoff_name"
+            echo "tarName=$tar_name"
+            echo "isPrerelease=$is_prerelease"
+          } >> "$GITHUB_OUTPUT"
+        #
+        # Check out to validate the corresponding commit.
+        #
+      - name: Check out the exact public commit
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
