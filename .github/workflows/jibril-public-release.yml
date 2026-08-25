@@ -164,6 +164,7 @@ jobs:
         env:
           LABEL: ${{ steps.release_info.outputs.label }}
           HANDOFF_NAME: ${{ steps.release_info.outputs.handoffName }}
+
         run: |
           set -euo pipefail
 
@@ -180,4 +181,79 @@ jobs:
             --handoff-name "$HANDOFF_NAME" \
             --releases-dir releases \
             --github-output "$GITHUB_OUTPUT"
+
+      #
+      # Validate the draft and staging assets
+      #
+      - name: Validate the draft assets
+        id: draft
+        env:
+          LABEL: ${{ steps.release_info.outputs.label }}
+          HANDOFF_NAME: ${{ steps.release_info.outputs.handoffName }}
+          GH_TOKEN: ${{ github.token }}
+
+        run: |
+          set -euo pipefail
+
+          # Check draft release
+          if ! release_json="$(gh api \
+              --header 'Accept: application/vnd.github+json' \
+              --header 'X-GitHub-Api-Version: 2026-03-10' \
+              "repos/${GITHUB_REPOSITORY}/releases/tags/${LABEL}")"; then
+            echo "No draft release exists for $LABEL." >&2
+            exit 1
+          fi
+
+          if [[ "$(jq -r '.draft' <<<"$release_json")" != "true" ||
+            "$(jq -r '.tag_name' <<<"$release_json")" != "$LABEL" ]]; then
+            echo "Release $LABEL is not the expected draft." >&2
+            exit 1
+          fi
+
+          expected_assets="$(printf '%s\n' \
+            "$HANDOFF_NAME" \
+            SHA256SUMS | LC_ALL=C sort)"
+          actual_assets="$(jq -r '.assets[].name' \
+            <<<"$release_json" | LC_ALL=C sort)"
+          if [[ "$actual_assets" != "$expected_assets" ]]; then
+            echo "The draft must contain exactly the handoff and staging SHA256SUMS." >&2
+            diff -u \
+              <(printf '%s\n' "$expected_assets") \
+              <(printf '%s\n' "$actual_assets") || true
+            exit 1
+          fi
+
+          # If this is a pre-existing tag then accept it only
+          # when it already references this exact reviewed ledger commit.
+          # If the tag does not exist, then we create it later.
+          tag_exists=false
+          if gh api \
+              --silent \
+              --header 'Accept: application/vnd.github+json' \
+              --header 'X-GitHub-Api-Version: 2026-03-10' \
+              "repos/${GITHUB_REPOSITORY}/git/ref/tags/${LABEL}" \
+              >/dev/null 2>&1; then
+            tag_exists=true
+            tag_commit="$(gh api \
+              --header 'Accept: application/vnd.github+json' \
+              --header 'X-GitHub-Api-Version: 2026-03-10' \
+              "repos/${GITHUB_REPOSITORY}/commits/${LABEL}" \
+              --jq '.sha')"
+            if [[ "$tag_commit" != "$GITHUB_SHA" ]]; then
+            echo "Error: existing tag $LABEL does not point to the reviewed ledger commit." >&2
+              exit 1
+            fi
+          fi
+
+          # Output releaseId and tagExists
+          {
+            echo "releaseId=$(jq -r '.id' <<<"$release_json")"
+            echo "tagExists=$tag_exists"
+          } >> "$GITHUB_OUTPUT"
+
+        #
+        # Install Cosign
+        #
+      - name: Install the pinned Cosign toolchain
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2, Cosign v3.0.6
 
