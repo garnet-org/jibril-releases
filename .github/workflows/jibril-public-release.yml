@@ -902,6 +902,7 @@ jobs:
       - name: Revalidate the remote draft immediately before publication
         env:
           LABEL: ${{ steps.release_info.outputs.label }}
+          RELEASE_ID: ${{ steps.draft.outputs.releaseId }}
           TAR_NAME: ${{ steps.release_info.outputs.tarName }}
           TAG_COMMIT_SHA: ${{ steps.tag.outputs.tagCommitSha }}
           GH_TOKEN: ${{ github.token }}
@@ -912,7 +913,7 @@ jobs:
           release_json="$(gh api \
             --header 'Accept: application/vnd.github+json' \
             --header 'X-GitHub-Api-Version: 2026-03-10' \
-            "repos/${GITHUB_REPOSITORY}/releases/tags/${LABEL}")"
+            "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}")"
           expected_assets="$(printf '%s\n' \
             jibril "$TAR_NAME" SHA256SUMS | LC_ALL=C sort)"
           actual_assets="$(jq -r '.assets[].name' \
