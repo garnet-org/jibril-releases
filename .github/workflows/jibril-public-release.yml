@@ -647,3 +647,107 @@ jobs:
 
           echo "tagCommitSha=$tag_commit" >> "$GITHUB_OUTPUT"
 
+        #
+        # Build the GitHub attestation predicate
+        #
+      - name: Build the public GitHub attestation predicate
+        env:
+          LABEL: ${{ steps.release_info.outputs.label }}
+          HANDOFF_NAME: ${{ steps.release_info.outputs.handoffName }}
+          TAR_NAME: ${{ steps.release_info.outputs.tarName }}
+          TAG_COMMIT_SHA: ${{ steps.tag.outputs.tagCommitSha }}
+          HANDOFF_SHA256: ${{ steps.ledger.outputs.handoffSha256 }}
+          RELEASE_JSON_SHA256: ${{ steps.ledger.outputs.releaseJsonSha256 }}
+          BINARY_SHA256: ${{ steps.ledger.outputs.binarySha256 }}
+          INNER_CHECKSUMS_SHA256: ${{ steps.ledger.outputs.innerChecksumsSha256 }}
+
+        run: |
+          set -euo pipefail
+
+          jq -n \
+            --arg release "$LABEL" \
+            --arg handoff_name "$HANDOFF_NAME" \
+            --arg handoff_sha256 "$HANDOFF_SHA256" \
+            --arg archive_name "$TAR_NAME" \
+            --arg release_json_sha256 "$RELEASE_JSON_SHA256" \
+            --arg binary_sha256 "$BINARY_SHA256" \
+            --arg inner_checksums_sha256 "$INNER_CHECKSUMS_SHA256" \
+            --arg public_repository "$GITHUB_REPOSITORY" \
+            --arg public_tag_commit "$TAG_COMMIT_SHA" \
+            --arg public_workflow_ref "$GITHUB_WORKFLOW_REF" \
+            --arg public_workflow_sha "$GITHUB_SHA" \
+            '{
+              schemaVersion: 1,
+              release: {
+                tag: $release,
+                platforms: ["linux-x86_64"],
+                archive: $archive_name
+              },
+              reviewedInput: {
+                handoff: {
+                  name: $handoff_name,
+                  sha256: $handoff_sha256
+                },
+                releaseJsonSha256: $release_json_sha256,
+                binarySha256: $binary_sha256,
+                innerChecksumsSha256: $inner_checksums_sha256
+              },
+              publisher: {
+                repository: $public_repository,
+                ledgerCommit: $public_tag_commit,
+                workflowRef: $public_workflow_ref,
+                workflowCommit: $public_workflow_sha
+              }
+            }' > "$RUNNER_TEMP/jibril-public-release-predicate.json"
+
+          jq -e . "$RUNNER_TEMP/jibril-public-release-predicate.json" >/dev/null
+
+        #
+        # Generate GitHub attestations
+        #
+      - name: Generate GitHub attestations for payloads and final assets
+        id: public_attestation
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: |
+            release-assets/jibril
+            public-package/jibril-checksums.txt
+            public-package/release.json
+            public-package/jibril.sigstore.json
+            public-package/jibril-checksums.txt.sigstore.json
+            public-package/release.json.sigstore.json
+            release-assets/${{ steps.release_info.outputs.tarName }}
+            release-assets/SHA256SUMS
+          predicate-type: ${{ env.PUBLIC_PREDICATE_TYPE }}
+          predicate-path: ${{ runner.temp }}/jibril-public-release-predicate.json
+
+        #
+        # Verify the GitHub attestations
+        #
+      - name: Verify the generated GitHub attestations
+        env:
+          ATTESTATION_BUNDLE: ${{ steps.public_attestation.outputs.bundle-path }}
+          TAR_NAME: ${{ steps.release_info.outputs.tarName }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          test -s "$ATTESTATION_BUNDLE"
+          jq -e . "$ATTESTATION_BUNDLE" >/dev/null
+          subjects=(
+            release-assets/jibril
+            public-package/jibril-checksums.txt
+            public-package/release.json
+            public-package/jibril.sigstore.json
+            public-package/jibril-checksums.txt.sigstore.json
+            public-package/release.json.sigstore.json
+            "release-assets/$TAR_NAME"
+            release-assets/SHA256SUMS
+          )
+          for subject in "${subjects[@]}"; do
+            gh attestation verify "$subject" \
+              --repo "$GITHUB_REPOSITORY" \
+              --predicate-type "$PUBLIC_PREDICATE_TYPE" \
+              --bundle "$ATTESTATION_BUNDLE"
+          done
+
