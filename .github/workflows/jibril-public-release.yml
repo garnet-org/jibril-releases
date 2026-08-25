@@ -312,7 +312,7 @@ jobs:
             exit 1
           fi
 
-          # Take advantage of GitHub redorded server-side sha256
+          # Take advantage of GitHub recorded server-side sha256
           # for each asset.
           release_json="$(gh api \
             --header 'Accept: application/vnd.github+json' \
@@ -477,4 +477,57 @@ jobs:
             "${verification_policy[@]}" \
             --bundle public-package/release.json.sigstore.json \
             public-package/release.json
+
+        #
+        # Build the public archive
+        #
+      - name: Build the public archive and SHA256SUMS
+        env:
+          TAR_NAME: ${{ steps.release_info.outputs.tarName }}
+          TZ: UTC
+
+        run: |
+          set -euo pipefail
+
+          rm -rf release-assets
+          mkdir -m 0700 release-assets
+          install -m 0755 release-inputs/jibril release-assets/jibril
+          package_files=(
+            jibril
+            jibril-checksums.txt
+            release.json
+            jibril.sigstore.json
+            jibril-checksums.txt.sigstore.json
+            release.json.sigstore.json
+          )
+
+          touch -d '1980-01-01 00:00:00 UTC' \
+            "${package_files[@]/#/public-package/}"
+
+          build_tar() {
+            local output_path="$1"
+            tar \
+              --sort=name \
+              --format=gnu \
+              --mtime='1980-01-01 00:00:00 UTC' \
+              --owner=0 \
+              --group=0 \
+              --numeric-owner \
+              -C public-package \
+              -cf - \
+              "${package_files[@]}" |
+              gzip -n -9 > "$output_path"
+          }
+
+          build_tar "release-assets/$TAR_NAME"
+          build_tar "$RUNNER_TEMP/$TAR_NAME.rebuilt"
+          cmp --silent \
+            "release-assets/$TAR_NAME" \
+            "$RUNNER_TEMP/$TAR_NAME.rebuilt"
+
+          (
+            cd release-assets
+            LC_ALL=C sha256sum jibril "$TAR_NAME" > SHA256SUMS
+            sha256sum --check --strict SHA256SUMS
+          )
 
