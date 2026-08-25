@@ -409,3 +409,72 @@ jobs:
             exit 1
           fi
 
+        #
+        # Sign assets with keyless Cosign
+        #
+      - name: Sign every public payload file with keyless Cosign
+        run: |
+          set -euo pipefail
+
+          rm -rf public-package
+          mkdir -m 0700 public-package
+          install -m 0755 release-inputs/jibril public-package/jibril
+          install -m 0644 \
+            release-inputs/jibril-checksums.txt \
+            public-package/jibril-checksums.txt
+          install -m 0644 \
+            release-inputs/release.json \
+            public-package/release.json
+
+          cosign sign-blob --yes \
+            --bundle public-package/jibril.sigstore.json \
+            public-package/jibril
+
+          cosign sign-blob --yes \
+            --bundle public-package/jibril-checksums.txt.sigstore.json \
+            public-package/jibril-checksums.txt
+
+          cosign sign-blob --yes \
+            --bundle public-package/release.json.sigstore.json \
+            public-package/release.json
+
+          for bundle in \
+            public-package/jibril.sigstore.json \
+            public-package/jibril-checksums.txt.sigstore.json \
+            public-package/release.json.sigstore.json; do
+            jq -e . "$bundle" >/dev/null
+            chmod 0644 "$bundle"
+          done
+
+        #
+        # Verify Cosign signatures
+        #
+      - name: Verify every public Cosign signature
+        run: |
+          set -euo pipefail
+
+          verification_policy=(
+            --certificate-identity "$COSIGN_CERTIFICATE_IDENTITY"
+            --certificate-oidc-issuer "$COSIGN_OIDC_ISSUER"
+            --certificate-github-workflow-name "$GITHUB_WORKFLOW"
+            --certificate-github-workflow-repository "$GITHUB_REPOSITORY"
+            --certificate-github-workflow-ref "$GITHUB_REF"
+            --certificate-github-workflow-sha "$GITHUB_SHA"
+            --certificate-github-workflow-trigger workflow_dispatch
+          )
+
+          cosign verify-blob \
+            "${verification_policy[@]}" \
+            --bundle public-package/jibril.sigstore.json \
+            public-package/jibril
+
+          cosign verify-blob \
+            "${verification_policy[@]}" \
+            --bundle public-package/jibril-checksums.txt.sigstore.json \
+            public-package/jibril-checksums.txt
+
+          cosign verify-blob \
+            "${verification_policy[@]}" \
+            --bundle public-package/release.json.sigstore.json \
+            public-package/release.json
+
