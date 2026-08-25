@@ -41,9 +41,11 @@ on:
 # Jobs and third-party actions receive no implicit permissions.
 permissions: {}
 
+# Serialize every public release, including different release labels.
 concurrency:
-  group: public-jibril-release-${{ inputs.release }}
+  group: public-jibril-release
   cancel-in-progress: false
+  queue: max
 
 jobs:
   public_release:
