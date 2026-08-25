@@ -170,7 +170,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          script_path=.github/scripts/release/validate-release-ledger.py
+          script_path="$GITHUB_WORKSPACE/.github/scripts/release/validate-release-ledger.py"
           if [[ ! -f "$script_path" || -L "$script_path" ]] ||
             ! git ls-files --error-unmatch -- "$script_path" >/dev/null 2>&1 ||
             ! git diff --quiet -- "$script_path"; then
@@ -345,7 +345,7 @@ jobs:
           rm -rf release-inputs
           mkdir -m 0700 release-inputs
 
-          script_path=.github/scripts/release/extract-jibril-handoff.py
+          script_path="$GITHUB_WORKSPACE/.github/scripts/release/extract-jibril-handoff.py"
           if [[ ! -f "$script_path" || -L "$script_path" ]] ||
             ! git ls-files --error-unmatch -- "$script_path" >/dev/null 2>&1 ||
             ! git diff --quiet -- "$script_path"; then
@@ -766,31 +766,37 @@ jobs:
         run: |
           set -euo pipefail
 
-          # If the update fails while the release is still a draft,
-          # try to rollback to the original staging assets.
-          rollback_staging_assets() {
-            local release_state
-            set +e
-            echo "Finalization failed; attempting to restore the staging draft." >&2
-            release_state="$(gh release view "$LABEL" \
-              --repo "$GITHUB_REPOSITORY" \
-              --json isDraft \
-              --jq '.isDraft' 2>/dev/null)"
-            if [[ "$release_state" == "true" ]]; then
-              for asset_name in jibril "$TAR_NAME" SHA256SUMS "$HANDOFF_NAME"; do
-                gh release delete-asset "$LABEL" "$asset_name" \
-                  --repo "$GITHUB_REPOSITORY" \
-                  --yes >/dev/null 2>&1 || true
-              done
-              gh release upload "$LABEL" \
-                "draft-inputs/$HANDOFF_NAME" \
-                draft-inputs/SHA256SUMS \
-                --repo "$GITHUB_REPOSITORY" \
-                --clobber >/dev/null 2>&1 || true
+          # Load rollback only from the commit
+          rollback_script="$GITHUB_WORKSPACE/.github/scripts/release/rollback-staging-assets.sh"
+          if [[ ! -f "$rollback_script" || -L "$rollback_script" ]]; then
+            echo "Missing or invalid rollback helper: $rollback_script" >&2
+            exit 1
+          fi
+          bash -n "$rollback_script"
+
+          # Preserve the original finalization failure, check whether the
+          # external rollback succeeded, and never resume partial publication.
+          handle_finalization_error() {
+            local original_status=$?
+            local rollback_status
+
+            # A rollback error must not recursively invoke this ERR handler.
+            trap - ERR
+
+            if bash "$rollback_script"; then
+              echo "The original staging draft was restored." >&2
+            else
+              rollback_status=$?
+              echo "The staging rollback failed with status $rollback_status." >&2
             fi
+
+            # Reset errors, capture and return original error
+            # if any.
+            set -e
+            exit "$original_status"
           }
-          # Register the rollback string trap
-          trap rollback_staging_assets ERR
+          # Register the rollback trap
+          trap handle_finalization_error ERR
 
           expected_staging_assets="$(printf '%s\n' \
             "$HANDOFF_NAME" SHA256SUMS | LC_ALL=C sort)"
