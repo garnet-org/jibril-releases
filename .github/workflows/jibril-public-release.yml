@@ -198,17 +198,45 @@ jobs:
           set -euo pipefail
 
           # Check draft release
-          if ! release_json="$(gh api \
+          if ! release_pages="$(gh api \
+              --paginate \
+              --slurp \
               --header 'Accept: application/vnd.github+json' \
               --header 'X-GitHub-Api-Version: 2026-03-10' \
-              "repos/${GITHUB_REPOSITORY}/releases/tags/${LABEL}")"; then
-            echo "No draft release exists for $LABEL." >&2
+              "repos/${GITHUB_REPOSITORY}/releases?per_page=100")"; then
+            echo "Failed to list releases in $GITHUB_REPOSITORY." >&2
+            exit 1
+          fi
+
+          draft_matches="$(jq -c --arg label "$LABEL" \
+            '[.[][] | select(.draft == true and .tag_name == $label)]' \
+            <<<"$release_pages")"
+          draft_count="$(jq -r 'length' <<<"$draft_matches")"
+          if [[ "$draft_count" -eq 0 ]]; then
+            echo "No authenticated draft release has tag_name '$LABEL'." >&2
+            exit 1
+          fi
+          if [[ "$draft_count" -ne 1 ]]; then
+            echo "Expected one draft for '$LABEL', found $draft_count." >&2
+            exit 1
+          fi
+
+          release_json="$(jq -c '.[0]' <<<"$draft_matches")"
+          release_id="$(jq -r '.id' <<<"$release_json")"
+          if [[ ! "$release_id" =~ ^[1-9][0-9]*$ ]]; then
+            echo "The selected draft has an invalid release ID." >&2
             exit 1
           fi
 
           if [[ "$(jq -r '.draft' <<<"$release_json")" != "true" ||
             "$(jq -r '.tag_name' <<<"$release_json")" != "$LABEL" ]]; then
             echo "Release $LABEL is not the expected draft." >&2
+            exit 1
+          fi
+
+          draft_author_id="$(jq -r '.author.id' <<<"$release_json")"
+          if [[ "$draft_author_id" != "$EXPECTED_DRAFT_AUTHOR_ID" ]]; then
+            echo "The draft was not created by the trusted private-release owner." >&2
             exit 1
           fi
 
@@ -249,7 +277,7 @@ jobs:
 
           # Output releaseId and tagExists
           {
-            echo "releaseId=$(jq -r '.id' <<<"$release_json")"
+            echo "releaseId=$release_id"
             echo "tagExists=$tag_exists"
           } >> "$GITHUB_OUTPUT"
 
