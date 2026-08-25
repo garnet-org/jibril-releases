@@ -240,7 +240,7 @@ jobs:
               "repos/${GITHUB_REPOSITORY}/commits/${LABEL}" \
               --jq '.sha')"
             if [[ "$tag_commit" != "$GITHUB_SHA" ]]; then
-            echo "Error: existing tag $LABEL does not point to the reviewed ledger commit." >&2
+              echo "Error: existing tag $LABEL does not point to the reviewed ledger commit." >&2
               exit 1
             fi
           fi
@@ -256,4 +256,77 @@ jobs:
         #
       - name: Install the pinned Cosign toolchain
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2, Cosign v3.0.6
+
+        #
+        # Download and authenticate draft assets
+        #
+      - name: Download and authenticate draft staging assets
+        env:
+          LABEL: ${{ steps.release_info.outputs.label }}
+          HANDOFF_NAME: ${{ steps.release_info.outputs.handoffName }}
+          EXPECTED_HANDOFF_SHA256: ${{ steps.ledger.outputs.handoffSha256 }}
+          GH_TOKEN: ${{ github.token }}
+
+        run: |
+          set -euo pipefail
+
+          for command_name in cosign jq readelf sha256sum tar; do
+            command -v "$command_name" >/dev/null
+          done
+
+          rm -rf draft-inputs
+          mkdir -m 0700 draft-inputs
+          for asset_name in "$HANDOFF_NAME" SHA256SUMS; do
+            gh release download "$LABEL" \
+              --repo "$GITHUB_REPOSITORY" \
+              --pattern "$asset_name" \
+              --dir draft-inputs
+          done
+
+          test -s "draft-inputs/$HANDOFF_NAME"
+          test -s draft-inputs/SHA256SUMS
+
+          # assert draft sha256sums
+          cmp --silent \
+            draft-inputs/SHA256SUMS \
+            "releases/$LABEL/SHA256SUMS-handoff"
+
+          # assert content
+          expected_line="${EXPECTED_HANDOFF_SHA256}  ${HANDOFF_NAME}"
+          if [[ "$(wc -l < draft-inputs/SHA256SUMS)" -ne 1 ||
+            "$(cat draft-inputs/SHA256SUMS)" != "$expected_line" ]]; then
+            echo "The draft SHA256SUMS is not the committed canonical manifest." >&2
+            exit 1
+          fi
+          (
+            cd draft-inputs
+            sha256sum --check --strict SHA256SUMS
+          )
+
+          # Assert the downloaded handoff checksum matches the
+          # committed handoff checksum
+          actual_handoff_sha256="$(sha256sum \
+            "draft-inputs/$HANDOFF_NAME" | cut -d' ' -f1)"
+          if [[ "$actual_handoff_sha256" != "$EXPECTED_HANDOFF_SHA256" ]]; then
+            echo "The downloaded handoff does not match the committed digest." >&2
+            exit 1
+          fi
+
+          # Take advantage of GitHub redorded server-side sha256
+          # for each asset.
+          release_json="$(gh api \
+            --header 'Accept: application/vnd.github+json' \
+            --header 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/${GITHUB_REPOSITORY}/releases/tags/${LABEL}")"
+          for asset_name in "$HANDOFF_NAME" SHA256SUMS; do
+            api_digest="$(jq -r --arg name "$asset_name" \
+              '.assets[] | select(.name == $name) | .digest' \
+              <<<"$release_json")"
+            local_digest="sha256:$(sha256sum \
+              "draft-inputs/$asset_name" | cut -d' ' -f1)"
+            if [[ "$api_digest" != "$local_digest" ]]; then
+              echo "GitHub's digest for $asset_name does not match the downloaded bytes." >&2
+              exit 1
+            fi
+          done
 
