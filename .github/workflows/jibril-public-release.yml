@@ -293,6 +293,7 @@ jobs:
       - name: Download and authenticate draft staging assets
         env:
           LABEL: ${{ steps.release_info.outputs.label }}
+          RELEASE_ID: ${{ steps.draft.outputs.releaseId }}
           HANDOFF_NAME: ${{ steps.release_info.outputs.handoffName }}
           EXPECTED_HANDOFF_SHA256: ${{ steps.ledger.outputs.handoffSha256 }}
           GH_TOKEN: ${{ github.token }}
@@ -347,7 +348,7 @@ jobs:
           release_json="$(gh api \
             --header 'Accept: application/vnd.github+json' \
             --header 'X-GitHub-Api-Version: 2026-03-10' \
-            "repos/${GITHUB_REPOSITORY}/releases/tags/${LABEL}")"
+            "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}")"
           for asset_name in "$HANDOFF_NAME" SHA256SUMS; do
             api_digest="$(jq -r --arg name "$asset_name" \
               '.assets[] | select(.name == $name) | .digest' \
