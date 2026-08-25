@@ -856,3 +856,103 @@ jobs:
 
           trap - ERR
 
+        #
+        # Revalidate the remote draft assets before final push
+        #
+      - name: Revalidate the remote draft immediately before publication
+        env:
+          LABEL: ${{ steps.release_info.outputs.label }}
+          TAR_NAME: ${{ steps.release_info.outputs.tarName }}
+          TAG_COMMIT_SHA: ${{ steps.tag.outputs.tagCommitSha }}
+          GH_TOKEN: ${{ github.token }}
+
+        run: |
+          set -euo pipefail
+
+          release_json="$(gh api \
+            --header 'Accept: application/vnd.github+json' \
+            --header 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/${GITHUB_REPOSITORY}/releases/tags/${LABEL}")"
+          expected_assets="$(printf '%s\n' \
+            jibril "$TAR_NAME" SHA256SUMS | LC_ALL=C sort)"
+          actual_assets="$(jq -r '.assets[].name' \
+            <<<"$release_json" | LC_ALL=C sort)"
+          if [[ "$(jq -r '.draft' <<<"$release_json")" != "true" ||
+            "$(jq -r '.immutable // false' <<<"$release_json")" != "false" ||
+            "$actual_assets" != "$expected_assets" ]]; then
+            echo "The release is not in the expected final draft state." >&2
+            exit 1
+          fi
+
+          # Get the tag commit
+          tag_commit="$(gh api \
+            --header 'Accept: application/vnd.github+json' \
+            --header 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/${GITHUB_REPOSITORY}/commits/${LABEL}" \
+            --jq '.sha')"
+          if [[ "$tag_commit" != "$TAG_COMMIT_SHA" ||
+            "$tag_commit" != "$GITHUB_SHA" ]]; then
+            echo "The release tag changed before publication." >&2
+            exit 1
+          fi
+
+          # Verify assets match
+          verify_dir="$RUNNER_TEMP/prepublish-assets"
+          rm -rf "$verify_dir"
+          mkdir -m 0700 "$verify_dir"
+          for asset_name in jibril "$TAR_NAME" SHA256SUMS; do
+            gh release download "$LABEL" \
+              --repo "$GITHUB_REPOSITORY" \
+              --pattern "$asset_name" \
+              --dir "$verify_dir"
+            cmp --silent \
+              "release-assets/$asset_name" \
+              "$verify_dir/$asset_name"
+          done
+          (
+            cd "$verify_dir"
+            sha256sum --check --strict SHA256SUMS
+          )
+
+        #
+        # Publish
+        #
+      - name: Publish the release
+        env:
+          LABEL: ${{ steps.release_info.outputs.label }}
+          IS_PRERELEASE: ${{ steps.release_info.outputs.isPrerelease }}
+          TAG_COMMIT_SHA: ${{ steps.tag.outputs.tagCommitSha }}
+          GH_TOKEN: ${{ github.token }}
+
+        run: |
+          set -euo pipefail
+
+          release_date="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          release_notes=$'Public Jibril release for Linux x86_64.\n\n'
+          release_notes+=$'Date: '"${release_date}"$'\n'
+          release_notes+=$'Public ledger and tag commit: '"${TAG_COMMIT_SHA}"$'\n'
+          release_notes+=$'Public signing workflow: '"${GITHUB_WORKFLOW_REF}"$'\n'
+          release_notes+=$'Public signing workflow commit: '"${GITHUB_SHA}"$'\n'
+          release_notes+=$'Cosign identity: '"${COSIGN_CERTIFICATE_IDENTITY}"$'\n'
+          release_notes+=$'Cosign issuer: '"${COSIGN_OIDC_ISSUER}"$'\n'
+          release_notes+=$'GitHub attestation predicate: '"${PUBLIC_PREDICATE_TYPE}"$'\n'
+
+          # Check if it is a prerelease
+          if [[ "$IS_PRERELEASE" == "true" ]]; then
+            gh release edit "$LABEL" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "$LABEL" \
+              --notes "$release_notes" \
+              --draft=false \
+              --prerelease \
+              --latest=false
+          else
+            gh release edit "$LABEL" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "$LABEL" \
+              --notes "$release_notes" \
+              --draft=false \
+              --prerelease=false \
+              --latest
+          fi
+
