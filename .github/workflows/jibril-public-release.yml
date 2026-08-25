@@ -330,3 +330,82 @@ jobs:
             fi
           done
 
+        #
+        # Extract the handoff archive inside release-inputs
+        #
+      - name: Safely extract the authenticated handoff
+        env:
+          HANDOFF_NAME: ${{ steps.release_info.outputs.handoffName }}
+
+        run: |
+          set -euo pipefail
+
+          rm -rf release-inputs
+          mkdir -m 0700 release-inputs
+
+          script_path=.github/scripts/release/extract-jibril-handoff.py
+          if [[ ! -f "$script_path" || -L "$script_path" ]] ||
+            ! git ls-files --error-unmatch -- "$script_path" >/dev/null 2>&1 ||
+            ! git diff --quiet -- "$script_path"; then
+            echo "The handoff extractor is missing, unsafe, or modified." >&2
+            exit 1
+          fi
+
+          python3 -I -B "$script_path" \
+            --archive "draft-inputs/$HANDOFF_NAME" \
+            --destination release-inputs
+
+        #
+        # Match extracted handoff to the referenced ledger commit
+        #
+      - name: Match the extracted handoff to the committed ledger
+        env:
+          LABEL: ${{ steps.release_info.outputs.label }}
+          EXPECTED_BINARY_SHA256: ${{ steps.ledger.outputs.binarySha256 }}
+          EXPECTED_INNER_CHECKSUMS_SHA256: ${{ steps.ledger.outputs.innerChecksumsSha256 }}
+          EXPECTED_RELEASE_JSON_SHA256: ${{ steps.ledger.outputs.releaseJsonSha256 }}
+
+        run: |
+          set -euo pipefail
+
+          # Assert committed release with extracted version
+          cmp --silent \
+            release-inputs/release.json \
+            "releases/$LABEL/release.json"
+
+          actual_release_json_sha256="$(sha256sum \
+            release-inputs/release.json | cut -d' ' -f1)"
+          if [[ "$actual_release_json_sha256" != "$EXPECTED_RELEASE_JSON_SHA256" ]]; then
+            echo "The embedded release.json digest does not match the ledger." >&2
+            exit 1
+          fi
+
+          expected_inner_line="${EXPECTED_BINARY_SHA256}  jibril"
+          if [[ "$(wc -l < release-inputs/jibril-checksums.txt)" -ne 1 ||
+            "$(cat release-inputs/jibril-checksums.txt)" != "$expected_inner_line" ]]; then
+            echo "jibril-checksums.txt is not the expected canonical manifest." >&2
+            exit 1
+          fi
+          (
+            cd release-inputs
+            sha256sum --check --strict jibril-checksums.txt
+          )
+
+          # Assert checksums
+          actual_binary_sha256="$(sha256sum \
+            release-inputs/jibril | cut -d' ' -f1)"
+          actual_inner_checksums_sha256="$(sha256sum \
+            release-inputs/jibril-checksums.txt | cut -d' ' -f1)"
+          if [[ "$actual_binary_sha256" != "$EXPECTED_BINARY_SHA256" ||
+            "$actual_inner_checksums_sha256" != "$EXPECTED_INNER_CHECKSUMS_SHA256" ]]; then
+            echo "The extracted subject digests do not match release.json." >&2
+            exit 1
+          fi
+
+          if ! readelf -h release-inputs/jibril |
+            grep -Eq 'Machine:[[:space:]]+Advanced Micro Devices X86-64'; then
+            echo "The promoted Jibril binary is not Linux x86_64." >&2
+            file release-inputs/jibril >&2
+            exit 1
+          fi
+
