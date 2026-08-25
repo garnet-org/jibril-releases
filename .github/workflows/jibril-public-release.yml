@@ -156,4 +156,28 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 1
           persist-credentials: false
+      #
+      # Validate the release information
+      #
+      - name: Validate the draft release information
+        id: ledger
+        env:
+          LABEL: ${{ steps.release_info.outputs.label }}
+          HANDOFF_NAME: ${{ steps.release_info.outputs.handoffName }}
+        run: |
+          set -euo pipefail
+
+          script_path=.github/scripts/release/validate-release-ledger.py
+          if [[ ! -f "$script_path" || -L "$script_path" ]] ||
+            ! git ls-files --error-unmatch -- "$script_path" >/dev/null 2>&1 ||
+            ! git diff --quiet -- "$script_path"; then
+            echo "The release-ledger validator is missing, unsafe, or modified." >&2
+            exit 1
+          fi
+
+          python3 -I -B "$script_path" \
+            --label "$LABEL" \
+            --handoff-name "$HANDOFF_NAME" \
+            --releases-dir releases \
+            --github-output "$GITHUB_OUTPUT"
 
