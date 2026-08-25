@@ -531,3 +531,119 @@ jobs:
             sha256sum --check --strict SHA256SUMS
           )
 
+        #
+        # Verify the archive
+        #
+      - name: Verify the complete public archive
+        env:
+          TAR_NAME: ${{ steps.release_info.outputs.tarName }}
+
+        run: |
+          set -euo pipefail
+
+          package_files=(
+            jibril
+            jibril-checksums.txt
+            release.json
+            jibril.sigstore.json
+            jibril-checksums.txt.sigstore.json
+            release.json.sigstore.json
+          )
+          expected_contents="$(printf '%s\n' \
+            "${package_files[@]}" | LC_ALL=C sort)"
+          actual_contents="$(tar -tzf \
+            "release-assets/$TAR_NAME" | LC_ALL=C sort)"
+          if [[ "$actual_contents" != "$expected_contents" ]]; then
+            echo "The public TAR has unexpected contents." >&2
+            exit 1
+          fi
+
+          verify_dir="$RUNNER_TEMP/public-tar-verification"
+          rm -rf "$verify_dir"
+          mkdir -m 0700 "$verify_dir"
+          tar \
+            --extract \
+            --gzip \
+            --file "release-assets/$TAR_NAME" \
+            --directory "$verify_dir" \
+            --no-same-owner \
+            --no-same-permissions
+
+          for package_file in "${package_files[@]}"; do
+            test -s "$verify_dir/$package_file"
+            cmp --silent \
+              "public-package/$package_file" \
+              "$verify_dir/$package_file"
+          done
+
+          expected_final_manifest="$(printf '%s  jibril\n%s  %s' \
+            "$(sha256sum release-assets/jibril | cut -d' ' -f1)" \
+            "$(sha256sum "release-assets/$TAR_NAME" | cut -d' ' -f1)" \
+            "$TAR_NAME")"
+          if [[ "$(wc -l < release-assets/SHA256SUMS)" -ne 2 ||
+            "$(cat release-assets/SHA256SUMS)" != "$expected_final_manifest" ]]; then
+            echo "The final SHA256SUMS is not canonical." >&2
+            exit 1
+          fi
+          (
+            cd release-assets
+            sha256sum --check --strict SHA256SUMS
+          )
+          cmp --silent "$verify_dir/jibril" release-assets/jibril
+
+        #
+        # Assert the tag binds to the ledger commit
+        #
+      - name: Bind the release tag to the reviewed ledger commit
+        id: tag
+        env:
+          LABEL: ${{ steps.release_info.outputs.label }}
+          RELEASE_ID: ${{ steps.draft.outputs.releaseId }}
+          TAG_EXISTS: ${{ steps.draft.outputs.tagExists }}
+          GH_TOKEN: ${{ github.token }}
+
+        run: |
+          set -euo pipefail
+
+          release_json="$(gh api \
+            --header 'Accept: application/vnd.github+json' \
+            --header 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}")"
+          if [[ "$(jq -r '.draft' <<<"$release_json")" != "true" ||
+            "$(jq -r '.immutable // false' <<<"$release_json")" != "false" ||
+            "$(jq -r '.tag_name' <<<"$release_json")" != "$LABEL" ]]; then
+            echo "The draft changed before tag binding." >&2
+            exit 1
+          fi
+
+          if [[ "$TAG_EXISTS" != "true" ]]; then
+            gh api \
+              --method POST \
+              --header 'Accept: application/vnd.github+json' \
+              --header 'X-GitHub-Api-Version: 2026-03-10' \
+              "repos/${GITHUB_REPOSITORY}/git/refs" \
+              -f "ref=refs/tags/${LABEL}" \
+              -f "sha=${GITHUB_SHA}" \
+              >/dev/null
+          fi
+
+          tag_commit="$(gh api \
+            --header 'Accept: application/vnd.github+json' \
+            --header 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/${GITHUB_REPOSITORY}/commits/${LABEL}" \
+            --jq '.sha')"
+          if [[ "$tag_commit" != "$GITHUB_SHA" ]]; then
+            echo "Release tag $LABEL is not bound to the reviewed ledger commit." >&2
+            exit 1
+          fi
+
+          gh api \
+            --method PATCH \
+            --header 'Accept: application/vnd.github+json' \
+            --header 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" \
+            -f "target_commitish=${GITHUB_SHA}" \
+            >/dev/null
+
+          echo "tagCommitSha=$tag_commit" >> "$GITHUB_OUTPUT"
+
