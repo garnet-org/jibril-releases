@@ -768,10 +768,13 @@ jobs:
 
           # Load rollback only from the commit
           rollback_script="$GITHUB_WORKSPACE/.github/scripts/release/rollback-staging-assets.sh"
-          if [[ ! -f "$rollback_script" || -L "$rollback_script" ]]; then
-            echo "Missing or invalid rollback helper: $rollback_script" >&2
+          if [[ ! -f "$rollback_script" || -L "$rollback_script" ]] ||
+            ! git ls-files --error-unmatch -- "$rollback_script" >/dev/null 2>&1 ||
+            ! git diff --quiet -- "$rollback_script"; then
+            echo "The rollback helper is missing, unsafe, or modified: $rollback_script" >&2
             exit 1
           fi
+
           bash -n "$rollback_script"
 
           # Preserve the original finalization failure, check whether the
