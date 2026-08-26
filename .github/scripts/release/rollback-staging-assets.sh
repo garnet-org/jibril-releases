@@ -4,6 +4,7 @@
 #
 # Required environment variables:
 #   LABEL              Release tag being finalized.
+#   RELEASE_ID         Numeric ID of the draft release being finalized.
 #   HANDOFF_NAME       Original handoff archive asset name.
 #   TAR_NAME           Final public TAR asset name.
 #   GITHUB_REPOSITORY  Target repository in OWNER/REPO form.
@@ -17,14 +18,20 @@ set +e
 set -uo pipefail
 
 : "${LABEL:?LABEL is required}"
+: "${RELEASE_ID:?RELEASE_ID is required}"
 : "${HANDOFF_NAME:?HANDOFF_NAME is required}"
 : "${TAR_NAME:?TAR_NAME is required}"
 : "${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is required}"
 : "${GH_TOKEN:?GH_TOKEN is required}"
 : "${GITHUB_WORKSPACE:?GITHUB_WORKSPACE is required}"
 
-if ! command -v gh >/dev/null 2>&1; then
-  echo "Rollback failed: GitHub CLI is unavailable." >&2
+if ! command -v gh >/dev/null 2>&1 || ! command -v jq >/dev/null 2>&1; then
+  echo "Rollback failed: GitHub CLI or jq is unavailable." >&2
+  exit 1
+fi
+
+if [[ ! "$RELEASE_ID" =~ ^[1-9][0-9]*$ ]]; then
+  echo "Rollback failed: invalid draft release ID: $RELEASE_ID" >&2
   exit 1
 fi
 
@@ -42,20 +49,23 @@ done
 
 echo "Finalization failed; attempting to restore the staging draft." >&2
 
-# A published release must never be changed by this rollback helper.
-release_state="$(gh release view "$LABEL" \
-  --repo "$GITHUB_REPOSITORY" \
-  --json isDraft \
-  --jq '.isDraft' 2>/dev/null)"
+# Draft releases are resolved by their numeric ID. The release-by-tag endpoint
+# is for published releases.
+release_json="$(gh api \
+  --header 'Accept: application/vnd.github+json' \
+  --header 'X-GitHub-Api-Version: 2026-03-10' \
+  "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}")"
 command_status=$?
 
 if (( command_status != 0 )); then
-  echo "Rollback failed: could not read the release state." >&2
+  echo "Rollback failed: could not read release ID $RELEASE_ID." >&2
   exit 1
 fi
 
-if [[ "$release_state" != "true" ]]; then
-  echo "Rollback refused: the release is no longer a draft." >&2
+if [[ "$(jq -r '.draft' <<<"$release_json")" != "true" ||
+  "$(jq -r '.immutable // false' <<<"$release_json")" != "false" ||
+  "$(jq -r '.tag_name' <<<"$release_json")" != "$LABEL" ]]; then
+  echo "Rollback refused: release ID $RELEASE_ID is not the mutable draft for $LABEL." >&2
   exit 1
 fi
 
@@ -82,15 +92,25 @@ fi
 # Success requires the draft to contain exactly the original two assets.
 expected_assets="$(printf '%s\n' \
   "$HANDOFF_NAME" SHA256SUMS | LC_ALL=C sort)"
-actual_assets="$(gh release view "$LABEL" \
-  --repo "$GITHUB_REPOSITORY" \
-  --json assets,isDraft \
-  --jq 'select(.isDraft == true) | .assets[].name' 2>/dev/null |
-  LC_ALL=C sort)"
+final_release_json="$(gh api \
+  --header 'Accept: application/vnd.github+json' \
+  --header 'X-GitHub-Api-Version: 2026-03-10' \
+  "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}")"
 command_status=$?
 
-if (( command_status != 0 )) ||
-  [[ "$actual_assets" != "$expected_assets" ]]; then
+if (( command_status != 0 )); then
+  echo "Rollback failed: could not re-read release ID $RELEASE_ID." >&2
+  rollback_status=1
+else
+  actual_assets="$(jq -r '.assets[].name' \
+    <<<"$final_release_json" | LC_ALL=C sort)"
+fi
+
+if (( command_status == 0 )) &&
+  { [[ "$(jq -r '.draft' <<<"$final_release_json")" != "true" ]] ||
+    [[ "$(jq -r '.immutable // false' <<<"$final_release_json")" != "false" ]] ||
+    [[ "$(jq -r '.tag_name' <<<"$final_release_json")" != "$LABEL" ]] ||
+    [[ "$actual_assets" != "$expected_assets" ]]; }; then
   echo "Rollback failed: the staging draft was not restored exactly." >&2
   rollback_status=1
 fi
