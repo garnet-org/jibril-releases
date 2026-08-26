@@ -1,0 +1,94 @@
+name: List Releases and Tags
+
+on:
+  workflow_dispatch:
+
+# Draft releases are returned only to authenticated callers with push access.
+# This workflow performs only read operations despite requesting Contents write.
+permissions:
+  contents: write
+
+jobs:
+  debug_releases:
+    name: List releases and corresponding tags
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    steps:
+      - name: Show repository and token permissions
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          gh api "repos/${GITHUB_REPOSITORY}" \
+            --header 'Accept: application/vnd.github+json' \
+            --header 'X-GitHub-Api-Version: 2026-03-10' \
+            --jq '{
+              repository: .full_name,
+              default_branch,
+              permissions
+            }'
+
+      - name: List all releases and corresponding tags
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          release_pages="$(gh api \
+            --paginate \
+            --slurp \
+            --header 'Accept: application/vnd.github+json' \
+            --header 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/${GITHUB_REPOSITORY}/releases?per_page=100")"
+
+          tag_pages="$(gh api \
+            --paginate \
+            --slurp \
+            --header 'Accept: application/vnd.github+json' \
+            --header 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/${GITHUB_REPOSITORY}/tags?per_page=100")"
+
+          jq -n \
+            --argjson release_pages "$release_pages" \
+            --argjson tag_pages "$tag_pages" \
+            '
+              [$release_pages[][]] as $releases |
+              [$tag_pages[][]] as $tags |
+              {
+                releases: [
+                  $releases[] as $release |
+                  ($tags |
+                    map(select(.name == $release.tag_name)) |
+                    first) as $tag |
+                  {
+                    release_id: $release.id,
+                    tag_name: $release.tag_name,
+                    release_name: $release.name,
+                    draft: $release.draft,
+                    prerelease: $release.prerelease,
+                    immutable: ($release.immutable // false),
+                    target_commitish: $release.target_commitish,
+                    author: $release.author.login,
+                    corresponding_tag: {
+                      exists: ($tag != null),
+                      commit_sha: ($tag.commit.sha // null)
+                    },
+                    assets: [$release.assets[].name]
+                  }
+                ],
+                tags_without_release: [
+                  $tags[] as $tag |
+                  select(
+                    ($releases |
+                      map(.tag_name) |
+                      index($tag.name)) == null
+                  ) |
+                  {
+                    tag_name: $tag.name,
+                    commit_sha: $tag.commit.sha
+                  }
+                ]
+              }
+            '
