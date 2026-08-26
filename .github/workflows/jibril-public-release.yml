@@ -45,7 +45,6 @@ permissions: {}
 concurrency:
   group: public-jibril-release
   cancel-in-progress: false
-  queue: max
 
 jobs:
   public_release:
@@ -68,8 +67,12 @@ jobs:
       EXPECTED_DRAFT_AUTHOR_ID: ${{ vars.PRIVATE_RELEASE_DISPATCHER_ID }}
 
       PUBLIC_PREDICATE_TYPE: https://github.com/garnet-org/jibril-releases/attestations/release/v1
-      COSIGN_CERTIFICATE_IDENTITY: https://github.com/${{ github.workflow_ref }}
-      COSIGN_OIDC_ISSUER: https://token.actions.githubusercontent.com
+
+      # These are verification expectations, not Cosign service settings. Do
+      # not use the reserved COSIGN_OIDC_ISSUER name: Cosign v3 interprets it
+      # as an explicit signing service URL and rejects its signing config.
+      EXPECTED_CERTIFICATE_IDENTITY: https://github.com/${{ github.workflow_ref }}
+      EXPECTED_CERTIFICATE_OIDC_ISSUER: https://token.actions.githubusercontent.com
 
     steps:
       - name: Validate the manual request and protected workflow identity
@@ -286,6 +289,8 @@ jobs:
         #
       - name: Install the pinned Cosign toolchain
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2, Cosign v3.0.6
+        with:
+          cosign-release: v3.0.6
 
         #
         # Download and authenticate draft assets
@@ -485,8 +490,8 @@ jobs:
           set -euo pipefail
 
           verification_policy=(
-            --certificate-identity "$COSIGN_CERTIFICATE_IDENTITY"
-            --certificate-oidc-issuer "$COSIGN_OIDC_ISSUER"
+            --certificate-identity "$EXPECTED_CERTIFICATE_IDENTITY"
+            --certificate-oidc-issuer "$EXPECTED_CERTIFICATE_OIDC_ISSUER"
             --certificate-github-workflow-name "$GITHUB_WORKFLOW"
             --certificate-github-workflow-repository "$GITHUB_REPOSITORY"
             --certificate-github-workflow-ref "$GITHUB_REF"
@@ -974,8 +979,8 @@ jobs:
           release_notes+=$'Public ledger and tag commit: '"${TAG_COMMIT_SHA}"$'\n'
           release_notes+=$'Public signing workflow: '"${GITHUB_WORKFLOW_REF}"$'\n'
           release_notes+=$'Public signing workflow commit: '"${GITHUB_SHA}"$'\n'
-          release_notes+=$'Cosign identity: '"${COSIGN_CERTIFICATE_IDENTITY}"$'\n'
-          release_notes+=$'Cosign issuer: '"${COSIGN_OIDC_ISSUER}"$'\n'
+          release_notes+=$'Cosign identity: '"${EXPECTED_CERTIFICATE_IDENTITY}"$'\n'
+          release_notes+=$'Cosign issuer: '"${EXPECTED_CERTIFICATE_OIDC_ISSUER}"$'\n'
           release_notes+=$'GitHub attestation predicate: '"${PUBLIC_PREDICATE_TYPE}"$'\n'
 
           # Check if it is a prerelease
@@ -1116,7 +1121,7 @@ jobs:
             echo "- Final checksum manifest: SHA256SUMS"
             echo "- Ledger checksum manifest: releases/$LABEL/SHA256SUMS-handoff"
             echo "- Public signing workflow: $GITHUB_WORKFLOW_REF"
-            echo "- Cosign identity: $COSIGN_CERTIFICATE_IDENTITY"
+            echo "- Cosign identity: $EXPECTED_CERTIFICATE_IDENTITY"
             echo "- GitHub attestation: $ATTESTATION_URL"
             echo "- Immutable release verification: passed"
           } >> "$GITHUB_STEP_SUMMARY"
