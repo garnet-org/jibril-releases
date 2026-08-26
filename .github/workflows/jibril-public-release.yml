@@ -793,6 +793,7 @@ jobs:
       - name: Replace the staging assets with the final ones
         env:
           LABEL: ${{ steps.release_info.outputs.label }}
+          RELEASE_ID: ${{ steps.draft.outputs.releaseId }}
           HANDOFF_NAME: ${{ steps.release_info.outputs.handoffName }}
           TAR_NAME: ${{ steps.release_info.outputs.tarName }}
           GH_TOKEN: ${{ github.token }}
@@ -832,20 +833,25 @@ jobs:
             set -e
             exit "$original_status"
           }
-          # Register the rollback trap
-          trap handle_finalization_error ERR
 
           expected_staging_assets="$(printf '%s\n' \
             "$HANDOFF_NAME" SHA256SUMS | LC_ALL=C sort)"
-          actual_assets="$(gh release view "$LABEL" \
-            --repo "$GITHUB_REPOSITORY" \
-            --json assets,isDraft \
-            --jq 'select(.isDraft == true) | .assets[].name' |
-            LC_ALL=C sort)"
-          if [[ "$actual_assets" != "$expected_staging_assets" ]]; then
-            echo "The draft staging assets changed before finalization." >&2
+          release_json="$(gh api \
+            --header 'Accept: application/vnd.github+json' \
+            --header 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}")"
+          actual_assets="$(jq -r '.assets[].name' \
+            <<<"$release_json" | LC_ALL=C sort)"
+          if [[ "$(jq -r '.draft' <<<"$release_json")" != "true" ||
+            "$(jq -r '.immutable // false' <<<"$release_json")" != "false" ||
+            "$(jq -r '.tag_name' <<<"$release_json")" != "$LABEL" ||
+            "$actual_assets" != "$expected_staging_assets" ]]; then
+            echo "Release ID $RELEASE_ID is not the expected staging draft for $LABEL." >&2
             exit 1
           fi
+
+          # Register the trap now
+          trap handle_finalization_error ERR
 
           # Upload the archive and direct binary first,
           # then replace SHA256SUMS and remove the handoff last.
@@ -890,12 +896,17 @@ jobs:
 
           expected_final_assets="$(printf '%s\n' \
             jibril "$TAR_NAME" SHA256SUMS | LC_ALL=C sort)"
-          final_assets="$(gh release view "$LABEL" \
-            --repo "$GITHUB_REPOSITORY" \
-            --json assets \
-            --jq '.assets[].name' | LC_ALL=C sort)"
-          if [[ "$final_assets" != "$expected_final_assets" ]]; then
-            echo "The draft does not contain exactly the three final assets." >&2
+          final_release_json="$(gh api \
+            --header 'Accept: application/vnd.github+json' \
+            --header 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}")"
+          final_assets="$(jq -r '.assets[].name' \
+            <<<"$final_release_json" | LC_ALL=C sort)"
+          if [[ "$(jq -r '.draft' <<<"$final_release_json")" != "true" ||
+            "$(jq -r '.immutable // false' <<<"$final_release_json")" != "false" ||
+            "$(jq -r '.tag_name' <<<"$final_release_json")" != "$LABEL" ||
+            "$final_assets" != "$expected_final_assets" ]]; then
+            echo "Release ID $RELEASE_ID is not the expected three-asset final draft." >&2
             exit 1
           fi
 
@@ -966,6 +977,7 @@ jobs:
       - name: Publish the release
         env:
           LABEL: ${{ steps.release_info.outputs.label }}
+          RELEASE_ID: ${{ steps.draft.outputs.releaseId }}
           IS_PRERELEASE: ${{ steps.release_info.outputs.isPrerelease }}
           TAG_COMMIT_SHA: ${{ steps.tag.outputs.tagCommitSha }}
           GH_TOKEN: ${{ github.token }}
@@ -984,23 +996,21 @@ jobs:
           release_notes+=$'GitHub attestation predicate: '"${PUBLIC_PREDICATE_TYPE}"$'\n'
 
           # Check if it is a prerelease
+          make_latest=true
           if [[ "$IS_PRERELEASE" == "true" ]]; then
-            gh release edit "$LABEL" \
-              --repo "$GITHUB_REPOSITORY" \
-              --title "$LABEL" \
-              --notes "$release_notes" \
-              --draft=false \
-              --prerelease \
-              --latest=false
-          else
-            gh release edit "$LABEL" \
-              --repo "$GITHUB_REPOSITORY" \
-              --title "$LABEL" \
-              --notes "$release_notes" \
-              --draft=false \
-              --prerelease=false \
-              --latest
+            make_latest=false
           fi
+
+          gh api --method PATCH \
+            --header 'Accept: application/vnd.github+json' \
+            --header 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" \
+            -f "name=$LABEL" \
+            -f "body=$release_notes" \
+            -F draft=false \
+            -F "prerelease=$IS_PRERELEASE" \
+            -f "make_latest=$make_latest" \
+            >/dev/null
 
         #
         # Confirm immutable release including integrity and attestations
