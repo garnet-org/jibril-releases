@@ -108,7 +108,7 @@ def parse_arguments() -> argparse.Namespace:
         "--releases-dir",
         type=Path,
         default=REPOSITORY_ROOT / "releases",
-        help="repository release-ledger directory (default: ./releases)",
+        help=f"release-ledger directory (default: {REPOSITORY_ROOT / 'releases'})",
     )
     parser.add_argument(
         "--label",
@@ -444,8 +444,11 @@ def main() -> None:
     """Verify one handoff archive and record it in the committed ledger."""
     arguments = parse_arguments()
     archive = arguments.archive
-    checksum = arguments.checksum or archive.with_name(f"{archive.name}.SHA256SUM")
     label = arguments.label
+
+    if not archive.name:
+        fail(f"handoff archive path names no file: {archive}")
+    checksum = arguments.checksum or archive.with_name(f"{archive.name}.SHA256SUM")
 
     if label is not None and not SEMVER.fullmatch(label):
         fail(f"invalid release label: {label}")
