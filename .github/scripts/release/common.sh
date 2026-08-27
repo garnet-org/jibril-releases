@@ -131,3 +131,34 @@ gh_delete_asset() {
   echo "gh_delete_asset: giving up on '$asset_name' after 5 attempts." >&2
   return 1
 }
+
+# log_section <title>
+#
+# Start a block of related checks. The leading blank line is what makes the
+# log skimmable in the web UI, where every line is otherwise the same weight.
+log_section() {
+  printf '\n=== %s ===\n' "${1:?log_section: title is required}"
+}
+
+# log_field <name> <value>
+#
+# Report a value the run observed or is about to check against. Aligned so a
+# column of digests can be compared by eye.
+log_field() {
+  printf '  %-34s %s\n' "${1:?log_field: name is required}:" "${2-}"
+}
+
+# log_ok <message>
+#
+# Report a check that passed. Say what was proven, not that a command ran.
+log_ok() {
+  printf '  [ok] %s\n' "${1:?log_ok: message is required}"
+}
+
+# log_note <message>
+#
+# Report an indented free-form line: list members, retry progress, closing
+# summaries.
+log_note() {
+  printf '  %s\n' "${1-}"
+}
