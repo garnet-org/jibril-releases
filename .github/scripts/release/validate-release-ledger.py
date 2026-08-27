@@ -3,7 +3,7 @@
 
 The workflow calls this program after checking out the exact protected commit.
 It validates releases/index.json, releases/<tag>/release.json, and the external
-SHA256SUMS-handoff manifest.
+<handoff archive name>.SHA256SUM manifest.
 On success this program appends trusted digest values to the GitHub Actions
 output file supplied with --github-output.
 
@@ -33,6 +33,7 @@ UTC_TIMESTAMP = re.compile(
     r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}"
     r"(?:\.\d+)?(?:Z|\+00:00)$"
 )
+INDEX_SCHEMA_VERSION = 2
 
 
 def parse_arguments() -> argparse.Namespace:
@@ -77,91 +78,84 @@ def read_regular_file(path: Path) -> bytes:
 def parse_json(raw: bytes, description: str) -> object:
     """Decode strict UTF-8 JSON with a useful error message."""
     try:
-        return json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        return json.loads(raw.decode("utf-8"), object_pairs_hook=reject_duplicate_keys)
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
         fail(f"invalid {description} JSON: {error}")
 
 
+def reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    """Refuse documents where a later duplicate key would silently win."""
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate key {key!r}")
+        result[key] = value
+    return result
+
+
+def precedence_key(tag: str) -> tuple:
+    """Return the semantic-version precedence key for a v-prefixed tag."""
+    body = tag[1:].split("+", 1)[0]
+    core, _, prerelease = body.partition("-")
+    major, minor, patch = (int(part) for part in core.split("."))
+    if not prerelease:
+        return (major, minor, patch, 1, ())
+
+    identifiers = tuple(
+        (0, int(identifier), "") if identifier.isdigit() else (1, 0, identifier)
+        for identifier in prerelease.split(".")
+    )
+    return (major, minor, patch, 0, identifiers)
+
+
+def handoff_sidecar_name(tag: str) -> str:
+    """Return the committed sidecar filename for one release tag."""
+    return f"jibril-{tag}-linux-x86_64.handoff.tar.gz.SHA256SUM"
+
+
 def validate_index(index: object, label: str) -> None:
-    """Validate the index without using its final checksum pointer as handoff data."""
+    """Validate the tag-keyed index of release directories."""
     if (
         not isinstance(index, dict)
         or set(index) != {"schemaVersion", "releases"}
-        or index["schemaVersion"] != 1
-        or not isinstance(index["releases"], list)
+        or index["schemaVersion"] != INDEX_SCHEMA_VERSION
+        or not isinstance(index["releases"], dict)
     ):
         fail("releases/index.json has an invalid structure")
 
-    seen: set[str] = set()
-    selected: list[dict[str, object]] = []
-    tags: list[str] = []
+    # Duplicate keys were already rejected while parsing, so the key sequence
+    # below is exactly the sequence in the committed bytes.
+    tags = list(index["releases"])
 
-    for entry in index["releases"]:
-        if not isinstance(entry, dict) or set(entry) != {
-            "tag",
-            "platforms",
-            "release",
-            "checksums",
-        }:
-            fail("releases/index.json contains an invalid entry")
+    for tag in tags:
+        entry = index["releases"][tag]
+        if not isinstance(entry, dict) or set(entry) != {"platforms", "release"}:
+            fail(f"releases/index.json entry {tag!r} has unexpected fields")
 
-        tag = entry["tag"]
-        if not isinstance(tag, str) or not SEMVER.fullmatch(tag) or tag in seen:
-            fail("releases/index.json contains an invalid or duplicate tag")
+        if not SEMVER.fullmatch(tag):
+            fail(f"releases/index.json contains an invalid tag: {tag!r}")
         if entry["platforms"] != ["linux-x86_64"]:
             fail("releases/index.json contains unsupported platforms")
 
-        expected_release = f"releases/{tag}/release.json"
-        accepted_checksums = {
-            f"releases/{tag}/SHA256SUMS",
-            f"releases/{tag}/SHA256SUMS-handoff",
-        }
+        expected_release = f"releases/{tag}"
         if entry["release"] != expected_release:
             fail(
                 f"releases/index.json entry {tag!r} has an incorrect release path: "
                 f"expected {expected_release!r}, found {entry['release']!r}"
             )
-        if entry["checksums"] not in accepted_checksums:
-            accepted = ", ".join(sorted(repr(path) for path in accepted_checksums))
-            fail(
-                f"releases/index.json entry {tag!r} has an incorrect checksum path: "
-                f"expected one of {accepted}, found {entry['checksums']!r}"
-            )
 
-        seen.add(tag)
-        tags.append(tag)
-        if tag == label:
-            selected.append(entry)
+    expected_order = sorted(tags, key=precedence_key, reverse=True)
+    if tags != expected_order:
+        fail(
+            "releases/index.json keys are not ordered newest first: "
+            f"expected {', '.join(expected_order)}"
+        )
 
-    if tags != sorted(tags):
-        fail("releases/index.json entries are not sorted")
-
-    # The index checksum pointer describes the eventual public release. It may
-    # therefore name SHA256SUMS while this pre-publication ledger directory
-    # contains SHA256SUMS-handoff. Handoff validation deliberately reads the
-    # latter file directly and does not infer it from this index field.
-    expected_selected = {
-        "tag": label,
-        "platforms": ["linux-x86_64"],
-        "release": f"releases/{label}/release.json",
-    }
-    if not selected:
+    if label not in index["releases"]:
         available = ", ".join(tags) if tags else "(none)"
         fail(
             f"releases/index.json does not contain the selected tag {label!r}; "
             f"available tags: {available}"
-        )
-
-    selected_entry = selected[0]
-    mismatches = [
-        f"{field}: expected {expected!r}, found {selected_entry.get(field)!r}"
-        for field, expected in expected_selected.items()
-        if selected_entry.get(field) != expected
-    ]
-    if mismatches:
-        fail(
-            f"releases/index.json entry for {label!r} is incorrect: "
-            + "; ".join(mismatches)
         )
 
 
@@ -235,13 +229,14 @@ def validate_release(document: object, label: str, handoff_name: str) -> list[di
 
 def validate_handoff_manifest(raw: bytes, handoff_name: str) -> str:
     """Validate the canonical one-line outer checksum and return its digest."""
+    sidecar_name = f"{handoff_name}.SHA256SUM"
     try:
         manifest = raw.decode("ascii")
     except UnicodeDecodeError:
-        fail("SHA256SUMS-handoff must be ASCII")
+        fail(f"{sidecar_name} must be ASCII")
     match = re.fullmatch(rf"([0-9a-f]{{64}})  {re.escape(handoff_name)}\n", manifest)
     if not match:
-        fail("SHA256SUMS-handoff has an invalid canonical entry")
+        fail(f"{sidecar_name} has an invalid canonical entry")
     return match.group(1)
 
 
@@ -274,16 +269,19 @@ def main() -> None:
         fail("releases must be a real directory")
     if not release_dir.is_dir() or release_dir.is_symlink():
         fail(f"missing or unsafe committed release directory: {release_dir}")
-    if sorted(path.name for path in release_dir.iterdir()) != [
-        "SHA256SUMS-handoff",
-        "release.json",
-    ]:
-        fail(f"{release_dir} must contain exactly release.json and SHA256SUMS-handoff")
+    # The sidecar is committed under the handoff archive's own name.
+    sidecar_name = handoff_sidecar_name(label)
+    present = sorted(path.name for path in release_dir.iterdir())
+    if present != sorted(["release.json", sidecar_name]):
+        fail(
+            f"{release_dir} must contain exactly release.json and {sidecar_name}, "
+            f"found: {', '.join(present) or '(nothing)'}"
+        )
 
     # Read every committed input as a regular file; JSON and manifest parsing
     # below will reject empty or malformed content.
     release_bytes = read_regular_file(release_dir / "release.json")
-    handoff_sums = read_regular_file(release_dir / "SHA256SUMS-handoff")
+    handoff_sums = read_regular_file(release_dir / sidecar_name)
     index_bytes = read_regular_file(releases_dir / "index.json")
 
     # Validate the index, metadata schema, subject digests, and handoff digest.
