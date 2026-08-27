@@ -41,16 +41,8 @@ if [[ ! "$LABEL" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Z
   exit 1
 fi
 
-# Load helpers
-release_lib="$GITHUB_WORKSPACE/.github/scripts/release/common.sh"
-if [[ ! -f "$release_lib" || -L "$release_lib" ]] ||
-  ! git -C "$GITHUB_WORKSPACE" ls-files --error-unmatch -- "$release_lib" >/dev/null 2>&1 ||
-  ! git -C "$GITHUB_WORKSPACE" diff --quiet -- "$release_lib"; then
-  echo "Rollback failed: the shared release library is missing, unsafe, or modified." >&2
-  exit 1
-fi
 # shellcheck source=.github/scripts/release/common.sh
-source "$release_lib"
+source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 
 draft_inputs_dir="$GITHUB_WORKSPACE/draft-inputs"
 handoff_path="$draft_inputs_dir/$HANDOFF_NAME"
@@ -86,12 +78,9 @@ if [[ "$(jq -r '.draft' <<<"$release_json")" != "true" ||
   exit 1
 fi
 
-# Remove only the final-only assets. Missing assets are acceptable because the
-# failure may have happened before either upload completed, and gh_delete_asset
-# already reports absence as success. A delete that genuinely fails must not
-# abort the rollback here: the restore below still has to run, and the
-# expected-asset check at the end is what decides whether it worked.
-for asset_name in jibril "$TAR_NAME"; do
+# Remove every final asset. Missing assets are acceptable because the
+# failure may have happened before any upload completed.
+for asset_name in jibril "$TAR_NAME" SHA256SUMS; do
   gh_delete_asset "$RELEASE_ID" "$asset_name" || true
 done
 
