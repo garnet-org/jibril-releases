@@ -283,15 +283,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          script_path="$GITHUB_WORKSPACE/.github/scripts/release/validate-release-ledger.py"
-          if [[ ! -f "$script_path" || -L "$script_path" ]] ||
-            ! git ls-files --error-unmatch -- "$script_path" >/dev/null 2>&1 ||
-            ! git diff --quiet -- "$script_path"; then
-            echo "The release-ledger validator is missing, unsafe, or modified." >&2
-            exit 1
-          fi
-
-          python3 -I -B "$script_path" \
+          python3 -I -B .github/scripts/release/validate-release-ledger.py \
             --label "$LABEL" \
             --handoff-name "$HANDOFF_NAME" \
             --releases-dir releases \
