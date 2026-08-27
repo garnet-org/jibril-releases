@@ -35,9 +35,26 @@ if [[ ! "$RELEASE_ID" =~ ^[1-9][0-9]*$ ]]; then
   exit 1
 fi
 
+# Re-validate the label here rather than trusting the caller.
+if [[ ! "$LABEL" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]]; then
+  echo "Rollback failed: invalid SemVer release label: $LABEL" >&2
+  exit 1
+fi
+
+# Load helpers
+release_lib="$GITHUB_WORKSPACE/.github/scripts/release/common.sh"
+if [[ ! -f "$release_lib" || -L "$release_lib" ]] ||
+  ! git -C "$GITHUB_WORKSPACE" ls-files --error-unmatch -- "$release_lib" >/dev/null 2>&1 ||
+  ! git -C "$GITHUB_WORKSPACE" diff --quiet -- "$release_lib"; then
+  echo "Rollback failed: the shared release library is missing, unsafe, or modified." >&2
+  exit 1
+fi
+# shellcheck source=.github/scripts/release/common.sh
+source "$release_lib"
+
 draft_inputs_dir="$GITHUB_WORKSPACE/draft-inputs"
 handoff_path="$draft_inputs_dir/$HANDOFF_NAME"
-checksums_path="$draft_inputs_dir/SHA256SUMS"
+checksums_path="$draft_inputs_dir/$HANDOFF_NAME.SHA256SUM"
 
 # Never upload missing files or follow a replaced staging-file symlink.
 for staging_path in "$handoff_path" "$checksums_path"; do
@@ -51,7 +68,7 @@ echo "Finalization failed; attempting to restore the staging draft." >&2
 
 # Draft releases are resolved by their numeric ID. The release-by-tag endpoint
 # is for published releases.
-release_json="$(gh api \
+release_json="$(gh_retry gh api \
   --header 'Accept: application/vnd.github+json' \
   --header 'X-GitHub-Api-Version: 2026-03-10' \
   "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}")"
@@ -70,17 +87,18 @@ if [[ "$(jq -r '.draft' <<<"$release_json")" != "true" ||
 fi
 
 # Remove only the final-only assets. Missing assets are acceptable because the
-# failure may have happened before either upload completed.
+# failure may have happened before either upload completed, and gh_delete_asset
+# already reports absence as success. A delete that genuinely fails must not
+# abort the rollback here: the restore below still has to run, and the
+# expected-asset check at the end is what decides whether it worked.
 for asset_name in jibril "$TAR_NAME"; do
-  gh release delete-asset "$LABEL" "$asset_name" \
-    --repo "$GITHUB_REPOSITORY" \
-    --yes >/dev/null 2>&1 || true
+  gh_delete_asset "$RELEASE_ID" "$asset_name" || true
 done
 
 rollback_status=0
 
 # Restore or replace the original staging assets from the validated local copy.
-if ! gh release upload "$LABEL" \
+if ! gh_retry gh release upload "$LABEL" \
   "$handoff_path" \
   "$checksums_path" \
   --repo "$GITHUB_REPOSITORY" \
@@ -91,8 +109,8 @@ fi
 
 # Success requires the draft to contain exactly the original two assets.
 expected_assets="$(printf '%s\n' \
-  "$HANDOFF_NAME" SHA256SUMS | LC_ALL=C sort)"
-final_release_json="$(gh api \
+  "$HANDOFF_NAME" "$HANDOFF_NAME.SHA256SUM" | LC_ALL=C sort)"
+final_release_json="$(gh_retry gh api \
   --header 'Accept: application/vnd.github+json' \
   --header 'X-GitHub-Api-Version: 2026-03-10' \
   "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}")"
