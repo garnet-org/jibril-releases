@@ -1,17 +1,23 @@
 name: Release Jibril
 
 #
+# Workflow
+# --------
+#
 # A maintainer starts this workflow manually with one release label, for
 # example v2.17.0-rc.5. Before the run starts, the repository must contain:
 #
 #   releases/<label>/release.json
-#   releases/<label>/SHA256SUMS-handoff
+#   releases/<label>/jibril-<label>-linux-x86_64.handoff.tar.gz.SHA256SUM
 #   releases/index.json
+#
+# scripts/update-release-ledger.py writes all three from the handoff archive
+# produced by the private build.
 #
 # The matching draft release must contain exactly:
 #
 #   jibril-<label>-linux-x86_64.handoff.tar.gz
-#   SHA256SUMS
+#   jibril-<label>-linux-x86_64.handoff.tar.gz.SHA256SUM
 #
 # The handoff must contain exactly:
 #
@@ -19,22 +25,67 @@ name: Release Jibril
 #   jibril-checksums.txt
 #   release.json
 #
-# After every trust check passes, the workflow publishes exactly:
+# After every trust check passes, the workflow publishes a release
+# exactly with this files:
 #
 #   jibril
 #   jibril-<label>-linux-x86_64.tar.gz
 #   SHA256SUMS
 #
-# The public TAR contains the three handoff payload files and one keyless
-# Sigstore/Cosign bundle for each payload file.
-# GitHub artifact attestations cover all six TAR members plus the
-# direct binary, final TAR, and final SHA256SUMS.
-# The final SHA256SUMS covers all downloadable payloads.
+#
+# Security verification
+# ---------------------
+#
+# * The final SHA256SUMS covers all downloadable payloads.
+#
+# * The public TAR contains the three handoff payload files and one
+#   keyless Sigstore/Cosign bundle for each payload file.
+#
+# * GitHub artifact attestations cover all six TAR members plus the
+#   direct binary, final TAR, and final SHA256SUMS.
+#
+#
+# Failure handling and re-runs
+# ----------------------------
+#
+# The recovery model is deliberately blunt:
+#
+#   * Workflow never repairs a draft it finds in an unexpected shape.
+#   * Every run must start from a draft the trusted private dispatcher created,
+#     so the only supported recovery for a damaged draft is for a maintainer to
+#     delete it and re-stage it. The run prints the exact commands when it
+#     detects that state.
+#
+# What the workflow does do, so that reaching that state stays rare:
+#
+#   * Every idempotent GitHub read, download, and converging write is retried
+#     with backoff.
+#   * Draft mutations made by the finalization step are rolled back by a trap
+#     on ERR, INT, and TERM, and again by a final always() cleanup step that
+#     also covers cancellation and the job timeout, which no trap survives.
+#   * The handoff asset is the only artifact here that cannot be rebuilt from
+#     the reviewed commit, because only the private release workflow produces
+#     it.
+#   * A tag created by a run that then fails is deleted again. Otherwise a
+#     corrected ledger commit is permanently blocked by the stale tag, since
+#     an existing tag is only accepted when it names this exact commit.
+#
+#
+# Run Mode
+# --------
+# The job resolves the release state before doing anything and picks a mode:
+#
+#   mode=publish  A draft staged by the private dispatcher exists. Promote it.
+#   mode=verify   The label is already published. Published releases are
+#                 immutable, so there is nothing left to change and nothing a
+#                 maintainer could delete and redo either. The run re-verifies
+#                 the public artifacts against the reviewed ledger and both
+#                 attestation chains, then succeeds.
 on:
   workflow_dispatch:
     inputs:
       release:
-        description: Release label to publish, for example v2.17.0-rc.5
+        description: Release label to publish, for example v2.17.0
         required: true
         type: string
 
@@ -82,6 +133,18 @@ jobs:
         run: |
           set -euo pipefail
 
+          # This step deliberately runs before the checkout, so we keep
+          # minimal retry inline instead of cloning and sourcing from repo.
+          gh_retry() {
+            local attempt status
+            for attempt in 1 2 3 4 5; do
+              "$@" && return 0
+              status=$?
+              if (( attempt == 5 )); then return "$status"; fi
+              sleep $(( attempt * 3 ))
+            done
+          }
+
           if [[ "$GITHUB_EVENT_NAME" != "workflow_dispatch" ]]; then
             echo "Unexpected public release workflow context." >&2
             exit 1
@@ -106,7 +169,7 @@ jobs:
             exit 1
           fi
 
-          default_branch="$(gh api \
+          default_branch="$(gh_retry gh api \
             --header 'Accept: application/vnd.github+json' \
             --header 'X-GitHub-Api-Version: 2026-03-10' \
             "repos/${GITHUB_REPOSITORY}" \
@@ -121,12 +184,12 @@ jobs:
             exit 1
           fi
 
-          default_head="$(gh api \
+          default_head="$(gh_retry gh api \
             --header 'Accept: application/vnd.github+json' \
             --header 'X-GitHub-Api-Version: 2026-03-10' \
             "repos/${GITHUB_REPOSITORY}/commits/${default_branch}" \
             --jq '.sha')"
-          compare_status="$(gh api \
+          compare_status="$(gh_retry gh api \
             --header 'Accept: application/vnd.github+json' \
             --header 'X-GitHub-Api-Version: 2026-03-10' \
             "repos/${GITHUB_REPOSITORY}/compare/${GITHUB_SHA}...${default_head}" \
@@ -138,6 +201,7 @@ jobs:
             exit 1
           fi
 
+          # The handoff sidecar is always "$HANDOFF_NAME.SHA256SUM".
           handoff_name="jibril-${INPUT_RELEASE}-linux-x86_64.handoff.tar.gz"
           tar_name="jibril-${INPUT_RELEASE}-linux-x86_64.tar.gz"
           is_prerelease=false
@@ -161,6 +225,52 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 1
           persist-credentials: false
+      #
+      # Establish, once, that every helper this job runs is reviewed code
+      #
+      - name: Verify the release helpers are the reviewed, unmodified copies
+        run: |
+          set -euo pipefail
+
+          # Every step below runs or sources something from this directory, so
+          # let's ensure that scripts are committed and were not modified.
+          #
+          # This job does not writes below .github/. directory.
+          scripts_dir=.github/scripts/release
+
+          if [[ -L "$scripts_dir" || ! -d "$scripts_dir" ]]; then
+            echo "$scripts_dir must be a real directory." >&2
+            exit 1
+          fi
+
+          # Identical to the reviewed commit.
+          if ! git diff --quiet -- "$scripts_dir"; then
+            echo "Refusing to run: helpers under $scripts_dir differ from $GITHUB_SHA." >&2
+            git --no-pager diff --stat -- "$scripts_dir" >&2
+            exit 1
+          fi
+
+          # Nothing untracked, nothing missing, no stray subdirectories.
+          tracked="$(git ls-files -- "$scripts_dir" | LC_ALL=C sort)"
+          present="$(find "$scripts_dir" -mindepth 1 | LC_ALL=C sort)"
+          if [[ -z "$tracked" || "$tracked" != "$present" ]]; then
+            echo "Refusing to run: unexpected contents under $scripts_dir." >&2
+            diff -u \
+              <(printf '%s\n' "$tracked") \
+              <(printf '%s\n' "$present") >&2 || true
+            exit 1
+          fi
+
+          # Regular files only: a symlink would let a tracked, unmodified name
+          # resolve to content from somewhere else entirely.
+          while IFS= read -r helper; do
+            if [[ -L "$helper" || ! -f "$helper" ]]; then
+              echo "Refusing to run: $helper is not a regular file." >&2
+              exit 1
+            fi
+          done <<<"$tracked"
+
+          echo "Verified $(wc -l <<<"$tracked") release helpers against $GITHUB_SHA."
       #
       # Validate the release information
       #
