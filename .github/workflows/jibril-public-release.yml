@@ -26,7 +26,7 @@ name: Release Jibril
 #   release.json
 #
 # After every trust check passes, the workflow publishes a release
-# exactly with this files:
+# exactly with these files:
 #
 #   jibril
 #   jibril-<label>-linux-x86_64.tar.gz
@@ -235,7 +235,7 @@ jobs:
           # Every step below runs or sources something from this directory, so
           # let's ensure that scripts are committed and were not modified.
           #
-          # This job does not writes below .github/. directory.
+          # This job does not write below .github/. directory.
           scripts_dir=.github/scripts/release
 
           if [[ -L "$scripts_dir" || ! -d "$scripts_dir" ]]; then
@@ -709,8 +709,6 @@ jobs:
           # Automation tools can pick up if the tag was created by this run,
           # and we avoid getting blocked if the tag points to an old ledger
           # commit.
-          tag_created=false
-
           if [[ "$TAG_EXISTS" != "true" ]]; then
             # Do not retry but just resolve later the ref.
             create_status=0
@@ -724,10 +722,15 @@ jobs:
               >/dev/null || create_status=$?
 
             if (( create_status == 0 )); then
-              tag_created=true
+              # Publish the flag now, so it survives all paths regardless
+              # of any error that could happen.
+              echo "tagCreated=true" >> "$GITHUB_OUTPUT"
             elif gh_api_optional \
               "repos/${GITHUB_REPOSITORY}/git/ref/tags/${LABEL}" >/dev/null; then
-              echo "Tag $LABEL already exists; continuing to the commit check." >&2
+              # The ref exists but this run cannot prove it put it. Ownership
+              # won't be claimed, so the cleanup step will not delete it.
+              # The commit check below still decides whether it is acceptable.
+              echo "Tag $LABEL already exists; this run will not claim it." >&2
             else
               echo "Could not create release tag $LABEL." >&2
               exit 1
@@ -752,10 +755,9 @@ jobs:
             -f "target_commitish=${GITHUB_SHA}" \
             >/dev/null
 
-          {
-            echo "tagCommitSha=$tag_commit"
-            echo "tagCreated=$tag_created"
-          } >> "$GITHUB_OUTPUT"
+          # tagCreated was already emitted at the moment of creation above, so
+          # that it survives a failure between there and here.
+          echo "tagCommitSha=$tag_commit" >> "$GITHUB_OUTPUT"
 
         #
         # Build the GitHub attestation predicate
@@ -1243,23 +1245,67 @@ jobs:
       - name: Write the release summary
         env:
           LABEL: ${{ steps.release_info.outputs.label }}
+          HANDOFF_NAME: ${{ steps.release_info.outputs.handoffName }}
           TAR_NAME: ${{ steps.release_info.outputs.tarName }}
+          MODE: ${{ steps.draft.outputs.mode }}
           ATTESTATION_URL: ${{ steps.public_attestation.outputs.attestation-url }}
 
         run: |
           set -euo pipefail
 
+          # Mode verify is a no-op, so the summary should reflect that.
+          if [[ "$MODE" == "verify" ]]; then
+            heading="Verified already published public Jibril $LABEL release"
+            attestation_line="- GitHub attestation: verified from the original publishing run"
+          else
+            # Mode publish is the normal path, so the summary should reflect that.
+            heading="Published immutable public Jibril $LABEL release"
+            attestation_line="- GitHub attestation: $ATTESTATION_URL"
+          fi
+
           {
-            echo "## Published immutable public Jibril $LABEL release"
+            echo "## $heading"
             echo
             echo "- Release: $LABEL"
             echo "- Platform: linux-x86_64"
             echo "- Direct binary: jibril"
             echo "- Archive: $TAR_NAME"
             echo "- Final checksum manifest: SHA256SUMS"
-            echo "- Ledger checksum manifest: releases/$LABEL/SHA256SUMS-handoff"
+            echo "- Ledger checksum manifest: releases/$LABEL/$HANDOFF_NAME.SHA256SUM"
             echo "- Public signing workflow: $GITHUB_WORKFLOW_REF"
             echo "- Cosign identity: $EXPECTED_CERTIFICATE_IDENTITY"
-            echo "- GitHub attestation: $ATTESTATION_URL"
+            echo "$attestation_line"
             echo "- Immutable release verification: passed"
           } >> "$GITHUB_STEP_SUMMARY"
+
+        #
+        # Cleanup anything that we were not able to catch
+        #
+      - name: Restore the staging draft when the run did not publish
+        if: always()
+        env:
+          LABEL: ${{ steps.release_info.outputs.label }}
+          RELEASE_ID: ${{ steps.draft.outputs.releaseId }}
+          MODE: ${{ steps.draft.outputs.mode }}
+          # HANDOFF_NAME and TAR_NAME are consumed by rollback-staging-assets.sh
+          # via the environment.
+          HANDOFF_NAME: ${{ steps.release_info.outputs.handoffName }}
+          TAR_NAME: ${{ steps.release_info.outputs.tarName }}
+          TAG_CREATED: ${{ steps.tag.outputs.tagCreated }}
+          JOB_STATUS: ${{ job.status }}
+          GH_TOKEN: ${{ github.token }}
+
+        run: |
+          # The cleanup helper should never fail the job.
+          # See .github/scripts/release/cleanup-failed-run.sh.
+          #
+          # always() also fires for runs that never reached the checkout: an
+          # invalid label, a missing PRIVATE_RELEASE_DISPATCHER_ID, or a
+          # cancellation during the first step would also mean no cleanup.
+          cleanup=.github/scripts/release/cleanup-failed-run.sh
+          if [[ ! -f "$cleanup" ]]; then
+            echo "The cleanup is missing probably because there was no checkout in this run; nothing to restore."
+            exit 0
+          fi
+
+          bash "$cleanup"
