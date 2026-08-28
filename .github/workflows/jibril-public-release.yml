@@ -377,18 +377,38 @@ jobs:
             exit 1
           fi
 
-          # Take advantage of GitHub recorded server-side sha256
+          # Take advantage of GitHub recorded server side sha256
           # for each asset.
-          release_json="$(gh api \
-            --header 'Accept: application/vnd.github+json' \
-            --header 'X-GitHub-Api-Version: 2026-03-10' \
-            "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}")"
-          for asset_name in "$HANDOFF_NAME" SHA256SUMS; do
-            api_digest="$(jq -r --arg name "$asset_name" \
-              '.assets[] | select(.name == $name) | .digest' \
-              <<<"$release_json")"
+          #
+          # GitHub computes asset digests asynchronously after upload, so
+          # .digest is null for a short while on a freshly staged draft. Poll
+          # for it rather than reading null and reporting a digest mismatch.
+          for asset_name in "$HANDOFF_NAME" "$HANDOFF_NAME.SHA256SUM"; do
             local_digest="sha256:$(sha256sum \
               "draft-inputs/$asset_name" | cut -d' ' -f1)"
+            # set to null
+            api_digest=null
+            for attempt in {1..12}; do
+              release_json="$(gh_retry gh api \
+                --header 'Accept: application/vnd.github+json' \
+                --header 'X-GitHub-Api-Version: 2026-03-10' \
+                "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}")"
+              api_digest="$(jq -r --arg name "$asset_name" \
+                '.assets[] | select(.name == $name) | .digest // "null"' \
+                <<<"$release_json")"
+              if [[ "$api_digest" != "null" ]]; then
+                break
+              fi
+              if [[ "$attempt" -lt 12 ]]; then
+                echo "GitHub has not published a digest for $asset_name yet; retrying ($attempt/12)."
+                sleep 5
+              fi
+            done
+
+            if [[ "$api_digest" == "null" ]]; then
+              echo "GitHub never published a server side digest for $asset_name." >&2
+              exit 1
+            fi
             if [[ "$api_digest" != "$local_digest" ]]; then
               echo "GitHub's digest for $asset_name does not match the downloaded bytes." >&2
               exit 1
