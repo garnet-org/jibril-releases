@@ -995,11 +995,11 @@ jobs:
             "$(jq -r '.immutable // false' <<<"$final_release_json")" != "false" ||
             "$(jq -r '.tag_name' <<<"$final_release_json")" != "$LABEL" ||
             "$final_assets" != "$expected_final_assets" ]]; then
-            echo "Release ID $RELEASE_ID is not the expected three-asset final draft." >&2
+            echo "Release ID $RELEASE_ID does not contain the expected assets of a final draft." >&2
             exit 1
           fi
 
-          trap - ERR
+          trap - ERR INT TERM
 
         #
         # Revalidate the remote draft assets before final push
