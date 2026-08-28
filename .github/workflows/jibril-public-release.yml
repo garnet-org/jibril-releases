@@ -761,6 +761,7 @@ jobs:
         # Build the GitHub attestation predicate
         #
       - name: Build the public GitHub attestation predicate
+        if: steps.draft.outputs.mode == 'publish'
         env:
           LABEL: ${{ steps.release_info.outputs.label }}
           HANDOFF_NAME: ${{ steps.release_info.outputs.handoffName }}
@@ -816,6 +817,7 @@ jobs:
         # Generate GitHub attestations
         #
       - name: Generate GitHub attestations for payloads and final assets
+        if: steps.draft.outputs.mode == 'publish'
         id: public_attestation
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
@@ -835,6 +837,7 @@ jobs:
         # Verify the GitHub attestations
         #
       - name: Verify the generated GitHub attestations
+        if: steps.draft.outputs.mode == 'publish'
         env:
           ATTESTATION_BUNDLE: ${{ steps.public_attestation.outputs.bundle-path }}
           TAR_NAME: ${{ steps.release_info.outputs.tarName }}
@@ -865,6 +868,7 @@ jobs:
         # Update the assets with the final ones.
         #
       - name: Replace the staging assets with the final ones
+        if: steps.draft.outputs.mode == 'publish'
         env:
           LABEL: ${{ steps.release_info.outputs.label }}
           RELEASE_ID: ${{ steps.draft.outputs.releaseId }}
@@ -875,16 +879,11 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Load rollback only from the commit
-          rollback_script="$GITHUB_WORKSPACE/.github/scripts/release/rollback-staging-assets.sh"
-          if [[ ! -f "$rollback_script" || -L "$rollback_script" ]] ||
-            ! git ls-files --error-unmatch -- "$rollback_script" >/dev/null 2>&1 ||
-            ! git diff --quiet -- "$rollback_script"; then
-            echo "The rollback helper is missing, unsafe, or modified: $rollback_script" >&2
-            exit 1
-          fi
+          # shellcheck source=.github/scripts/release/common.sh
+          source .github/scripts/release/common.sh
 
-          bash -n "$rollback_script"
+          # Use absolute path because the trap below may fire from anywhere.
+          rollback_script="$GITHUB_WORKSPACE/.github/scripts/release/rollback-staging-assets.sh"
 
           # Preserve the original finalization failure, check whether the
           # external rollback succeeded, and never resume partial publication.
@@ -892,8 +891,8 @@ jobs:
             local original_status=$?
             local rollback_status
 
-            # A rollback error must not recursively invoke this ERR handler.
-            trap - ERR
+            # A rollback error must not recursively invoke this handler.
+            trap - ERR INT TERM
 
             if bash "$rollback_script"; then
               echo "The original staging draft was restored." >&2
