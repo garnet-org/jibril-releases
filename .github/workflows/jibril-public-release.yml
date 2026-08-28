@@ -1121,6 +1121,7 @@ jobs:
         # Publish
         #
       - name: Publish the release
+        if: steps.draft.outputs.mode == 'publish'
         env:
           LABEL: ${{ steps.release_info.outputs.label }}
           RELEASE_ID: ${{ steps.draft.outputs.releaseId }}
@@ -1147,6 +1148,11 @@ jobs:
             make_latest=false
           fi
 
+          # This PATCH is the point of no return. It is deliberately not
+          # retried since we want the release to be immutable.
+          #
+          # Instead, we resolve and verify again.
+          publish_status=0
           gh api --method PATCH \
             --header 'Accept: application/vnd.github+json' \
             --header 'X-GitHub-Api-Version: 2026-03-10' \
@@ -1156,7 +1162,35 @@ jobs:
             -F draft=false \
             -F "prerelease=$IS_PRERELEASE" \
             -f "make_latest=$make_latest" \
-            >/dev/null
+            >/dev/null || publish_status=$?
+
+          if (( publish_status != 0 )); then
+            echo "The publish request failed with status $publish_status; checking status..." >&2
+
+            # shellcheck source=.github/scripts/release/common.sh
+            source .github/scripts/release/common.sh
+
+            # Read back the release to see if it was actually published.
+            readback_status=0
+            published_json="$(gh_api_optional \
+              "repos/${GITHUB_REPOSITORY}/releases/tags/${LABEL}")" || readback_status=$?
+
+            if (( readback_status == 2 )); then
+              echo "Release $LABEL was not published; the draft is unchanged." >&2
+              exit "$publish_status"
+            fi
+            if (( readback_status != 0 )); then
+              echo "Could not determine whether $LABEL was published. Check the release by hand" >&2
+              echo "before re-running: a published release is immutable and must not be re-staged." >&2
+              exit "$publish_status"
+            fi
+
+            if [[ "$(jq -r '.id' <<<"$published_json")" != "$RELEASE_ID" ]]; then
+              echo "A different release now holds tag $LABEL." >&2
+              exit 1
+            fi
+            echo "Release $LABEL was already published; continuing to verification." >&2
+          fi
 
         #
         # Confirm immutable release including integrity and attestations
