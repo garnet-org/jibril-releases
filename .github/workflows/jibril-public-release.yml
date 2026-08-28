@@ -689,7 +689,10 @@ jobs:
         run: |
           set -euo pipefail
 
-          release_json="$(gh api \
+          # shellcheck source=.github/scripts/release/common.sh
+          source .github/scripts/release/common.sh
+
+          release_json="$(gh_retry gh api \
             --header 'Accept: application/vnd.github+json' \
             --header 'X-GitHub-Api-Version: 2026-03-10' \
             "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}")"
