@@ -1193,101 +1193,49 @@ jobs:
           fi
 
         #
-        # Confirm immutable release including integrity and attestations
+        # Verify mode: rebuild and verify local state from the published release
+        #
+      - name: Download and Verify the published assets
+        id: verify_only
+        if: steps.draft.outputs.mode == 'verify'
+        env:
+          LABEL: ${{ steps.release_info.outputs.label }}
+          TAR_NAME: ${{ steps.release_info.outputs.tarName }}
+          EXPECTED_BINARY_SHA256: ${{ steps.ledger.outputs.binarySha256 }}
+          EXPECTED_INNER_CHECKSUMS_SHA256: ${{ steps.ledger.outputs.innerChecksumsSha256 }}
+          EXPECTED_RELEASE_JSON_SHA256: ${{ steps.ledger.outputs.releaseJsonSha256 }}
+          GH_TOKEN: ${{ github.token }}
+
+        run: |
+          set -euo pipefail
+
+          # mode=verify
+          # Rechecks the already-published artifacts against the reviewed
+          # ledger and leaves them in release-assets/ for the next step.
+          # See .github/scripts/release/verify-published-release.sh.
+          bash .github/scripts/release/verify-published-release.sh
+
+        #
+        # Confirm Immutable release including integrity and attestations
         #
       - name: Confirm Immutable release and its integrity
         env:
           LABEL: ${{ steps.release_info.outputs.label }}
           TAR_NAME: ${{ steps.release_info.outputs.tarName }}
           IS_PRERELEASE: ${{ steps.release_info.outputs.isPrerelease }}
-          TAG_COMMIT_SHA: ${{ steps.tag.outputs.tagCommitSha }}
+          # The expected hash should be same but depends on which step
+          # run based on the mode, we select the matching one.
+          TAG_COMMIT_SHA: >-
+            ${{ steps.tag.outputs.tagCommitSha ||
+                steps.verify_only.outputs.tagCommitSha }}
           GH_TOKEN: ${{ github.token }}
 
         run: |
           set -euo pipefail
 
-          # Assert immutable release
-          immutable=false
-          for attempt in {1..15}; do
-            release_json="$(gh api \
-              --header 'Accept: application/vnd.github+json' \
-              --header 'X-GitHub-Api-Version: 2026-03-10' \
-              "repos/${GITHUB_REPOSITORY}/releases/tags/${LABEL}")"
-            immutable="$(jq -r '.immutable // false' <<<"$release_json")"
-            [[ "$immutable" == "true" ]] && break
-            [[ "$attempt" -lt 15 ]] && sleep 5
-          done
-
-          if [[ "$immutable" != "true" ||
-            "$(jq -r '.draft' <<<"$release_json")" != "false" ||
-            "$(jq -r '.prerelease' <<<"$release_json")" != "$IS_PRERELEASE" ]]; then
-            echo "The published release did not reach the expected immutable state." >&2
-            exit 1
-          fi
-
-          expected_assets="$(printf '%s\n' \
-            jibril "$TAR_NAME" SHA256SUMS | LC_ALL=C sort)"
-          actual_assets="$(jq -r '.assets[].name' \
-            <<<"$release_json" | LC_ALL=C sort)"
-          if [[ "$actual_assets" != "$expected_assets" ]]; then
-            echo "The immutable release has an unexpected asset set." >&2
-            exit 1
-          fi
-
-          # Assert the immutable tag reference the ledger commit.
-          tag_commit="$(gh api \
-            --header 'Accept: application/vnd.github+json' \
-            --header 'X-GitHub-Api-Version: 2026-03-10' \
-            "repos/${GITHUB_REPOSITORY}/commits/${LABEL}" \
-            --jq '.sha')"
-          if [[ "$tag_commit" != "$TAG_COMMIT_SHA" ||
-            "$tag_commit" != "$GITHUB_SHA" ]]; then
-            echo "The immutable tag does not name the reviewed ledger commit." >&2
-            exit 1
-          fi
-
-          # Assert assets against GitHub automatic immutable
-          # release attestation.
-          verified=false
-          for attempt in {1..30}; do
-            assets_verified=true
-            if ! gh release verify "$LABEL" --repo "$GITHUB_REPOSITORY"; then
-              assets_verified=false
-            else
-              for asset_name in jibril "$TAR_NAME" SHA256SUMS; do
-                if ! gh release verify-asset "$LABEL" \
-                  "release-assets/$asset_name" \
-                  --repo "$GITHUB_REPOSITORY"; then
-                  assets_verified=false
-                  break
-                fi
-              done
-            fi
-
-            if [[ "$assets_verified" == "true" ]]; then
-              verified=true
-              break
-            fi
-            if [[ "$attempt" -lt 30 ]]; then
-              echo "Immutable release attestation is not ready; retrying ($attempt/30)."
-              sleep 10
-            fi
-          done
-          if [[ "$verified" != "true" ]]; then
-            echo "The immutable release or one of its assets could not be verified." >&2
-            exit 1
-          fi
-
-          # Assert that every release asset is attested
-          # by the workflow
-          for subject in \
-            release-assets/jibril \
-            "release-assets/$TAR_NAME" \
-            release-assets/SHA256SUMS; do
-            gh attestation verify "$subject" \
-              --repo "$GITHUB_REPOSITORY" \
-              --predicate-type "$PUBLIC_PREDICATE_TYPE"
-          done
+          # Runs on both paths against whatever is in release-assets/.
+          # See .github/scripts/release/confirm-immutable-release.sh.
+          bash .github/scripts/release/confirm-immutable-release.sh
 
         #
         # Write Release summary
