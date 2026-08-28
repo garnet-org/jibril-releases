@@ -703,7 +703,17 @@ jobs:
             exit 1
           fi
 
+          # Record whether this run is the one that creates the tag. The
+          # cleanup step deletes it again if the run does not reach a published
+          # release.
+          # Automation tools can pick up if the tag was created by this run,
+          # and we avoid getting blocked if the tag points to an old ledger
+          # commit.
+          tag_created=false
+
           if [[ "$TAG_EXISTS" != "true" ]]; then
+            # Do not retry but just resolve later the ref.
+            create_status=0
             gh api \
               --method POST \
               --header 'Accept: application/vnd.github+json' \
@@ -711,10 +721,20 @@ jobs:
               "repos/${GITHUB_REPOSITORY}/git/refs" \
               -f "ref=refs/tags/${LABEL}" \
               -f "sha=${GITHUB_SHA}" \
-              >/dev/null
+              >/dev/null || create_status=$?
+
+            if (( create_status == 0 )); then
+              tag_created=true
+            elif gh_api_optional \
+              "repos/${GITHUB_REPOSITORY}/git/ref/tags/${LABEL}" >/dev/null; then
+              echo "Tag $LABEL already exists; continuing to the commit check." >&2
+            else
+              echo "Could not create release tag $LABEL." >&2
+              exit 1
+            fi
           fi
 
-          tag_commit="$(gh api \
+          tag_commit="$(gh_retry gh api \
             --header 'Accept: application/vnd.github+json' \
             --header 'X-GitHub-Api-Version: 2026-03-10' \
             "repos/${GITHUB_REPOSITORY}/commits/${LABEL}" \
@@ -732,7 +752,10 @@ jobs:
             -f "target_commitish=${GITHUB_SHA}" \
             >/dev/null
 
-          echo "tagCommitSha=$tag_commit" >> "$GITHUB_OUTPUT"
+          {
+            echo "tagCommitSha=$tag_commit"
+            echo "tagCreated=$tag_created"
+          } >> "$GITHUB_OUTPUT"
 
         #
         # Build the GitHub attestation predicate
