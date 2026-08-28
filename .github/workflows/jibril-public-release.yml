@@ -318,6 +318,7 @@ jobs:
         # Download and authenticate draft assets
         #
       - name: Download and authenticate draft staging assets
+        if: steps.draft.outputs.mode == 'publish'
         env:
           LABEL: ${{ steps.release_info.outputs.label }}
           RELEASE_ID: ${{ steps.draft.outputs.releaseId }}
@@ -328,37 +329,43 @@ jobs:
         run: |
           set -euo pipefail
 
+          # shellcheck source=.github/scripts/release/common.sh
+          source .github/scripts/release/common.sh
+
           for command_name in cosign jq readelf sha256sum tar; do
             command -v "$command_name" >/dev/null
           done
 
           rm -rf draft-inputs
           mkdir -m 0700 draft-inputs
-          for asset_name in "$HANDOFF_NAME" SHA256SUMS; do
-            gh release download "$LABEL" \
+          for asset_name in "$HANDOFF_NAME" "$HANDOFF_NAME.SHA256SUM"; do
+            # --clobber keeps the download idempotent: gh otherwise refuses to
+            # overwrite an existing file, which would turn a retried download
+            # into a hard failure.
+            gh_retry gh release download "$LABEL" \
               --repo "$GITHUB_REPOSITORY" \
               --pattern "$asset_name" \
-              --dir draft-inputs
+              --dir draft-inputs \
+              --clobber
           done
 
           test -s "draft-inputs/$HANDOFF_NAME"
-          test -s draft-inputs/SHA256SUMS
+          test -s "draft-inputs/$HANDOFF_NAME.SHA256SUM"
 
-          # assert draft sha256sums
           cmp --silent \
-            draft-inputs/SHA256SUMS \
-            "releases/$LABEL/SHA256SUMS-handoff"
+            "draft-inputs/$HANDOFF_NAME.SHA256SUM" \
+            "releases/$LABEL/$HANDOFF_NAME.SHA256SUM"
 
           # assert content
           expected_line="${EXPECTED_HANDOFF_SHA256}  ${HANDOFF_NAME}"
-          if [[ "$(wc -l < draft-inputs/SHA256SUMS)" -ne 1 ||
-            "$(cat draft-inputs/SHA256SUMS)" != "$expected_line" ]]; then
-            echo "The draft SHA256SUMS is not the committed canonical manifest." >&2
+          if [[ "$(wc -l < "draft-inputs/$HANDOFF_NAME.SHA256SUM")" -ne 1 ||
+            "$(cat "draft-inputs/$HANDOFF_NAME.SHA256SUM")" != "$expected_line" ]]; then
+            echo "The draft sidecar is not the committed canonical manifest." >&2
             exit 1
           fi
           (
             cd draft-inputs
-            sha256sum --check --strict SHA256SUMS
+            sha256sum --check --strict "$HANDOFF_NAME.SHA256SUM"
           )
 
           # Assert the downloaded handoff checksum matches the
