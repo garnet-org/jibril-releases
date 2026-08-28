@@ -52,18 +52,21 @@ if [[ "$MODE" != "publish" ]]; then
   exit 0
 fi
 
-# The marker is written by the finalization step immediately before its first
-# mutation. Without it, a run that failed earlier -- a bad ledger, a failed
-# signature check -- would try to "restore" a draft nobody had touched.
-if [[ ! -f "$RUNNER_TEMP/finalization-started" ]]; then
-  echo "The draft was never modified by this run; nothing to restore."
+# This run leaves behind at most two things, and they are created at different
+# points, so they are undone independently:
+#
+# 1. Draft edits when replacing the staging assets.
+# 2. Created tag label
+if [[ ! -f "$RUNNER_TEMP/finalization-started" && "$TAG_CREATED" != "true" ]]; then
+  echo "This run neither modified the draft nor created a tag; nothing to undo."
   exit 0
 fi
 
 # If the release already went out there is nothing to roll back and nothing to
-# delete: publication is irreversible. The run failed somewhere in the
-# post-publication verification, so the recovery is to run the workflow again,
-# which resolves mode=verify and re-checks the public artifacts.
+# delete: publication is irreversible, and the tag is part of what was
+# published. The run failed somewhere in the post-publication verification, so
+# the recovery is to run the workflow again, which resolves mode=verify and
+# re-checks the public artifacts.
 current_release="$(gh api \
   --header 'Accept: application/vnd.github+json' \
   --header 'X-GitHub-Api-Version: 2026-03-10' \
@@ -75,48 +78,56 @@ if [[ -n "$current_release" &&
   exit 0
 fi
 
+# 1. Undo the draft edits, if this run got as far as making any.
+#
 # Running the rollback twice is harmless: it deletes the final-only assets if
 # present and re-uploads the staging pair with --clobber, so it converges
 # whether or not the in-step trap already ran. It also refuses outright if the
 # release is no longer a mutable draft.
-rollback_ok=true
-if bash "$script_dir/rollback-staging-assets.sh"; then
-  echo "The original staging draft was restored."
+if [[ -f "$RUNNER_TEMP/finalization-started" ]]; then
+  if bash "$script_dir/rollback-staging-assets.sh"; then
+    echo "The original staging draft was restored."
+  else
+    echo "The staging rollback failed. Recover by hand:" >&2
+    echo "  gh release download '$LABEL' --repo '$GITHUB_REPOSITORY' --pattern '$HANDOFF_NAME'" >&2
+    echo "  gh release delete '$LABEL' --repo '$GITHUB_REPOSITORY' --yes" >&2
+    echo "  gh api --method DELETE repos/$GITHUB_REPOSITORY/git/refs/tags/$LABEL" >&2
+    echo "Then re-stage the draft from the private release workflow." >&2
+  fi
 else
-  rollback_ok=false
-  echo "The staging rollback failed. Recover by hand:" >&2
-  echo "  gh release download '$LABEL' --repo '$GITHUB_REPOSITORY' --pattern '$HANDOFF_NAME'" >&2
-  echo "  gh release delete '$LABEL' --repo '$GITHUB_REPOSITORY' --yes" >&2
-  echo "  gh api --method DELETE repos/$GITHUB_REPOSITORY/git/refs/tags/$LABEL" >&2
-  echo "Then re-stage the draft from the private release workflow." >&2
+  echo "The draft was never modified by this run; nothing to restore."
 fi
 
-# Remove a tag this run created but never published.
+# 2. Remove a tag this run created but never published.
 #
-# An existing tag is only accepted when it names the exact commit being
-# released, so a leftover tag from a failed run permanently blocks the next
-# attempt as soon as the ledger is corrected in a new commit. Only a tag this
-# run created is removed, and only while the release is still an unpublished
-# draft.
-if [[ "$TAG_CREATED" == "true" && "$rollback_ok" == "true" ]]; then
+# Deliberately not conditional on the rollback having succeeded. The tag and
+# the draft are separate pieces of leftover state, and a failed rollback is a
+# reason to remove the tag too, not a reason to keep it: the by-hand runbook
+# printed above ends with exactly this delete. The only thing that must stop
+# it is the release having been published, which the .draft re-read below
+# checks against the current state rather than the state read earlier.
+if [[ "$TAG_CREATED" == "true" ]]; then
   release_json="$(gh api \
     --header 'Accept: application/vnd.github+json' \
     --header 'X-GitHub-Api-Version: 2026-03-10' \
     "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" 2>/dev/null)"
-  if [[ -n "$release_json" &&
-    "$(jq -r '.draft' <<<"$release_json")" == "true" ]]; then
-    if gh api \
-      --method DELETE \
-      --header 'Accept: application/vnd.github+json' \
-      --header 'X-GitHub-Api-Version: 2026-03-10' \
-      "repos/${GITHUB_REPOSITORY}/git/refs/tags/${LABEL}" \
-      >/dev/null 2>&1; then
-      echo "Removed the tag $LABEL that this run created."
-    else
-      echo "Could not remove the tag $LABEL that this run created." >&2
-      echo "Delete it before releasing a corrected ledger commit:" >&2
-      echo "  gh api --method DELETE repos/$GITHUB_REPOSITORY/git/refs/tags/$LABEL" >&2
-    fi
+  if [[ -z "$release_json" ]]; then
+    echo "Could not read release $RELEASE_ID; leaving the tag $LABEL in place." >&2
+    echo "Delete it before releasing a corrected ledger commit:" >&2
+    echo "  gh api --method DELETE repos/$GITHUB_REPOSITORY/git/refs/tags/$LABEL" >&2
+  elif [[ "$(jq -r '.draft' <<<"$release_json")" != "true" ]]; then
+    echo "Release $LABEL is no longer a draft; keeping the tag."
+  elif gh api \
+    --method DELETE \
+    --header 'Accept: application/vnd.github+json' \
+    --header 'X-GitHub-Api-Version: 2026-03-10' \
+    "repos/${GITHUB_REPOSITORY}/git/refs/tags/${LABEL}" \
+    >/dev/null 2>&1; then
+    echo "Removed the tag $LABEL that this run created."
+  else
+    echo "Could not remove the tag $LABEL that this run created." >&2
+    echo "Delete it before releasing a corrected ledger commit:" >&2
+    echo "  gh api --method DELETE repos/$GITHUB_REPOSITORY/git/refs/tags/$LABEL" >&2
   fi
 fi
 
