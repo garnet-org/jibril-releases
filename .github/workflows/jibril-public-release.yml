@@ -908,8 +908,8 @@ jobs:
           }
 
           expected_staging_assets="$(printf '%s\n' \
-            "$HANDOFF_NAME" SHA256SUMS | LC_ALL=C sort)"
-          release_json="$(gh api \
+            "$HANDOFF_NAME" "$HANDOFF_NAME.SHA256SUM" | LC_ALL=C sort)"
+          release_json="$(gh_retry gh api \
             --header 'Accept: application/vnd.github+json' \
             --header 'X-GitHub-Api-Version: 2026-03-10' \
             "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}")"
@@ -923,53 +923,69 @@ jobs:
             exit 1
           fi
 
-          # Register the trap now
-          trap handle_finalization_error ERR
+          # Mark the draft as touched before the first mutation.
+          #
+          # The trap below cannot survive a job cancellation or the job
+          # timeout: the runner kills the step. The final always() cleanup step
+          # runs the same rollback in those cases, and this marker is how it
+          # knows the draft was actually modified.
+          : > "$RUNNER_TEMP/finalization-started"
 
-          # Upload the archive and direct binary first,
-          # then replace SHA256SUMS and remove the handoff last.
-          gh release upload "$LABEL" \
+          # Register the trap now with INT and TERM so we run on cancellation.
+          trap handle_finalization_error ERR INT TERM
+
+          # Upload the archive and direct binary first, then swap the staging
+          # checksums for the final SHA256SUMS.
+          #
+          # The handoff is deliberately NOT removed, we will handle it
+          # below.
+          #
+          # --clobber makes every upload converge instead of failing on an
+          # asset that a previous attempt already created, which matters
+          # because the TAR is not byte reproducible across runs and must
+          # always be replaced rather than reused.
+          gh_retry gh release upload "$LABEL" \
             "release-assets/$TAR_NAME" \
             release-assets/jibril \
-            --repo "$GITHUB_REPOSITORY"
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber
 
           verify_dir="$RUNNER_TEMP/remote-final-assets"
           rm -rf "$verify_dir"
           mkdir -m 0700 "$verify_dir"
           for asset_name in jibril "$TAR_NAME"; do
-            gh release download "$LABEL" \
+            gh_retry gh release download "$LABEL" \
               --repo "$GITHUB_REPOSITORY" \
               --pattern "$asset_name" \
-              --dir "$verify_dir"
+              --dir "$verify_dir" \
+              --clobber
             # Perform an extra verification
             cmp --silent \
               "release-assets/$asset_name" \
               "$verify_dir/$asset_name"
           done
 
-          # Replace the SHA256SUMS with the final release one.
-          gh release delete-asset "$LABEL" SHA256SUMS \
-            --repo "$GITHUB_REPOSITORY" \
-            --yes
-          gh release upload "$LABEL" \
+          # Drop the staging checksum and attach the final manifest.
+          gh_delete_asset "$RELEASE_ID" "$HANDOFF_NAME.SHA256SUM"
+          gh_retry gh release upload "$LABEL" \
             release-assets/SHA256SUMS \
-            --repo "$GITHUB_REPOSITORY"
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber
 
-          gh release download "$LABEL" \
+          gh_retry gh release download "$LABEL" \
             --repo "$GITHUB_REPOSITORY" \
             --pattern SHA256SUMS \
-            --dir "$verify_dir"
+            --dir "$verify_dir" \
+            --clobber
           cmp --silent \
             release-assets/SHA256SUMS \
             "$verify_dir/SHA256SUMS"
 
-          gh release delete-asset "$LABEL" "$HANDOFF_NAME" \
-            --repo "$GITHUB_REPOSITORY" \
-            --yes
-
+          # Four assets at this point: the three final ones plus the handoff,
+          # which stays attached until the last step before publication.
           expected_final_assets="$(printf '%s\n' \
-            jibril "$TAR_NAME" SHA256SUMS | LC_ALL=C sort)"
-          final_release_json="$(gh api \
+            jibril "$TAR_NAME" SHA256SUMS "$HANDOFF_NAME" | LC_ALL=C sort)"
+          final_release_json="$(gh_retry gh api \
             --header 'Accept: application/vnd.github+json' \
             --header 'X-GitHub-Api-Version: 2026-03-10' \
             "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}")"
