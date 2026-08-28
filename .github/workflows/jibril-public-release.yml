@@ -1017,12 +1017,18 @@ jobs:
         run: |
           set -euo pipefail
 
-          release_json="$(gh api \
+          # shellcheck source=.github/scripts/release/common.sh
+          source .github/scripts/release/common.sh
+
+          release_json="$(gh_retry gh api \
             --header 'Accept: application/vnd.github+json' \
             --header 'X-GitHub-Api-Version: 2026-03-10' \
             "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}")"
+          # The handoff is still attached: it is removed by the next step, so
+          # that everything which can still fail happens while the draft can
+          # still be rolled back to its staging shape.
           expected_assets="$(printf '%s\n' \
-            jibril "$TAR_NAME" SHA256SUMS | LC_ALL=C sort)"
+            jibril "$TAR_NAME" SHA256SUMS "$HANDOFF_NAME" | LC_ALL=C sort)"
           actual_assets="$(jq -r '.assets[].name' \
             <<<"$release_json" | LC_ALL=C sort)"
           if [[ "$(jq -r '.draft' <<<"$release_json")" != "true" ||
@@ -1033,7 +1039,7 @@ jobs:
           fi
 
           # Get the tag commit
-          tag_commit="$(gh api \
+          tag_commit="$(gh_retry gh api \
             --header 'Accept: application/vnd.github+json' \
             --header 'X-GitHub-Api-Version: 2026-03-10' \
             "repos/${GITHUB_REPOSITORY}/commits/${LABEL}" \
@@ -1049,10 +1055,11 @@ jobs:
           rm -rf "$verify_dir"
           mkdir -m 0700 "$verify_dir"
           for asset_name in jibril "$TAR_NAME" SHA256SUMS; do
-            gh release download "$LABEL" \
+            gh_retry gh release download "$LABEL" \
               --repo "$GITHUB_REPOSITORY" \
               --pattern "$asset_name" \
-              --dir "$verify_dir"
+              --dir "$verify_dir" \
+              --clobber
             cmp --silent \
               "release-assets/$asset_name" \
               "$verify_dir/$asset_name"
@@ -1061,6 +1068,54 @@ jobs:
             cd "$verify_dir"
             sha256sum --check --strict SHA256SUMS
           )
+
+        #
+        # Drop the staging handoff. This is the last reversible action
+        #
+      - name: Remove the staging handoff before publication
+        if: steps.draft.outputs.mode == 'publish'
+        env:
+          LABEL: ${{ steps.release_info.outputs.label }}
+          RELEASE_ID: ${{ steps.draft.outputs.releaseId }}
+          HANDOFF_NAME: ${{ steps.release_info.outputs.handoffName }}
+          TAR_NAME: ${{ steps.release_info.outputs.tarName }}
+          GH_TOKEN: ${{ github.token }}
+
+        run: |
+          set -euo pipefail
+
+          # The handoff is the only artifact in this pipeline that cannot be
+          # rebuilt from the reviewed commit. Only the private release workflow
+          # produces it. Deleting it therefore happens here, in its own step
+          # immediately before publication.
+          #
+          # Everything that can still fail has now run. A failure before
+          # this point leaves the handoff attached to the draft. That is what
+          # lets a maintainer or an automated process recover by downloading it
+          # and re-staging, instead of asking the private repository to
+          # rebuild the release. However the private repository still can rebuild
+          # and push the handoff any time, if the current draft is removed.
+
+          # shellcheck source=.github/scripts/release/common.sh
+          source .github/scripts/release/common.sh
+
+          gh_delete_asset "$RELEASE_ID" "$HANDOFF_NAME"
+
+          expected_assets="$(printf '%s\n' \
+            jibril "$TAR_NAME" SHA256SUMS | LC_ALL=C sort)"
+          release_json="$(gh_retry gh api \
+            --header 'Accept: application/vnd.github+json' \
+            --header 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}")"
+          actual_assets="$(jq -r '.assets[].name' \
+            <<<"$release_json" | LC_ALL=C sort)"
+          if [[ "$(jq -r '.draft' <<<"$release_json")" != "true" ||
+            "$(jq -r '.immutable // false' <<<"$release_json")" != "false" ||
+            "$(jq -r '.tag_name' <<<"$release_json")" != "$LABEL" ||
+            "$actual_assets" != "$expected_assets" ]]; then
+            echo "Release ID $RELEASE_ID does not contain the expected assets of a final draft." >&2
+            exit 1
+          fi
 
         #
         # Publish
