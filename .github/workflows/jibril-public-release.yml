@@ -1005,9 +1005,11 @@ jobs:
         # Revalidate the remote draft assets before final push
         #
       - name: Revalidate the remote draft immediately before publication
+        if: steps.draft.outputs.mode == 'publish'
         env:
           LABEL: ${{ steps.release_info.outputs.label }}
           RELEASE_ID: ${{ steps.draft.outputs.releaseId }}
+          HANDOFF_NAME: ${{ steps.release_info.outputs.handoffName }}
           TAR_NAME: ${{ steps.release_info.outputs.tarName }}
           TAG_COMMIT_SHA: ${{ steps.tag.outputs.tagCommitSha }}
           GH_TOKEN: ${{ github.token }}
