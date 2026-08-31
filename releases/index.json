@@ -1,6 +1,12 @@
 {
   "schemaVersion": 2,
   "releases": {
+    "v2.17.0-rc.8": {
+      "platforms": [
+        "linux-x86_64"
+      ],
+      "release": "releases/v2.17.0-rc.8"
+    },
     "v2.17.0-rc.7": {
       "platforms": [
         "linux-x86_64"
