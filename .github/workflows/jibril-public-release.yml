@@ -66,9 +66,6 @@ name: Release Jibril
 #   * The handoff asset is the only artifact here that cannot be rebuilt from
 #     the reviewed commit, because only the private release workflow produces
 #     it.
-#   * A tag created by a run that then fails is deleted again. Otherwise a
-#     corrected ledger commit is permanently blocked by the stale tag, since
-#     an existing tag is only accepted when it names this exact commit.
 #
 #
 # Run Mode
@@ -677,7 +674,7 @@ jobs:
         #
         # Assert the tag binds to the ledger commit
         #
-      - name: Bind the release tag to the reviewed ledger commit
+      - name: Bind the draft release to the reviewed ledger commit
         if: steps.draft.outputs.mode == 'publish'
         id: tag
         env:
@@ -692,72 +689,101 @@ jobs:
           # shellcheck source=.github/scripts/release/common.sh
           source .github/scripts/release/common.sh
 
+          # Bind the draft to the reviewed ledger commit.
+          # An orphaned draft is reachable twice in this step: the tag_name can
+          # change between resolve-release-state and the preflight below, and the
+          # PATCH further down can clear it. Both report the value observed and
+          # the way out, so the message names what actually changed.
+          report_orphaned_draft() {
+            local observed="$1" when="$2"
+            echo "The draft lost its tag_name $when." >&2
+            echo "  expected $LABEL, found $observed" >&2
+            echo "GitHub has orphaned it, so this run cannot publish it." >&2
+            echo >&2
+            echo "DO NOT DELETE THE DRAFT. This state is repairable, and the handoff" >&2
+            echo "attached to it is the only copy this repository can reach." >&2
+            echo "Re-run release-stage-public-draft.yaml in garnet-org/jibril for" >&2
+            echo "$LABEL: it PATCHes tag_name back and re-verifies the staged assets" >&2
+            echo "(its own state table lists \"draft, tag_name wrong or missing\" as" >&2
+            echo "repairable). Then run this workflow again." >&2
+          }
+
+          # Checked one field at a time. A single combined guard cannot say which
+          # field moved, and the tag_name case in particular has a specific
+          # recovery that a generic "the draft changed" message hides.
           release_json="$(gh_retry gh api \
             --header 'Accept: application/vnd.github+json' \
             --header 'X-GitHub-Api-Version: 2026-03-10' \
             "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}")"
-          if [[ "$(jq -r '.draft' <<<"$release_json")" != "true" ||
-            "$(jq -r '.immutable // false' <<<"$release_json")" != "false" ||
-            "$(jq -r '.tag_name' <<<"$release_json")" != "$LABEL" ]]; then
-            echo "The draft changed before tag binding." >&2
+          preflight_draft="$(jq -r '.draft' <<<"$release_json")"
+          preflight_immutable="$(jq -r '.immutable // false' <<<"$release_json")"
+          preflight_tag_name="$(jq -r '.tag_name' <<<"$release_json")"
+          log_field "draft" "$preflight_draft"
+          log_field "immutable" "$preflight_immutable"
+          log_field "tag_name" "$preflight_tag_name"
+
+          if [[ "$preflight_draft" != "true" ]]; then
+            echo "Release $RELEASE_ID is no longer a draft: draft=$preflight_draft." >&2
+            echo "Another run may have published it. Run this workflow again for" >&2
+            echo "$LABEL and it will resolve mode=verify." >&2
+            exit 1
+          fi
+          if [[ "$preflight_immutable" != "false" ]]; then
+            echo "Release $RELEASE_ID is already immutable: immutable=$preflight_immutable." >&2
+            echo "Nothing on it can be changed. Run this workflow again for $LABEL" >&2
+            echo "and it will verify the published release instead." >&2
+            exit 1
+          fi
+          if [[ "$preflight_tag_name" != "$LABEL" ]]; then
+            report_orphaned_draft "$preflight_tag_name" "before tag binding"
             exit 1
           fi
 
-          # Record whether this run is the one that creates the tag. The
-          # cleanup step deletes it again if the run does not reach a published
-          # release.
-          # Automation tools can pick up if the tag was created by this run,
-          # and we avoid getting blocked if the tag points to an old ledger
-          # commit.
-          if [[ "$TAG_EXISTS" != "true" ]]; then
-            # Do not retry but just resolve later the ref.
-            create_status=0
-            gh api \
-              --method POST \
-              --header 'Accept: application/vnd.github+json' \
-              --header 'X-GitHub-Api-Version: 2026-03-10' \
-              "repos/${GITHUB_REPOSITORY}/git/refs" \
-              -f "ref=refs/tags/${LABEL}" \
-              -f "sha=${GITHUB_SHA}" \
-              >/dev/null || create_status=$?
-
-            if (( create_status == 0 )); then
-              # Publish the flag now, so it survives all paths regardless
-              # of any error that could happen.
-              echo "tagCreated=true" >> "$GITHUB_OUTPUT"
-            elif gh_api_optional \
-              "repos/${GITHUB_REPOSITORY}/git/ref/tags/${LABEL}" >/dev/null; then
-              # The ref exists but this run cannot prove it put it. Ownership
-              # won't be claimed, so the cleanup step will not delete it.
-              # The commit check below still decides whether it is acceptable.
-              echo "Tag $LABEL already exists; this run will not claim it." >&2
-            else
-              echo "Could not create release tag $LABEL." >&2
-              exit 1
-            fi
-          fi
-
-          tag_commit="$(gh_retry gh api \
-            --header 'Accept: application/vnd.github+json' \
-            --header 'X-GitHub-Api-Version: 2026-03-10' \
-            "repos/${GITHUB_REPOSITORY}/commits/${LABEL}" \
-            --jq '.sha')"
-          if [[ "$tag_commit" != "$GITHUB_SHA" ]]; then
-            echo "Release tag $LABEL is not bound to the reviewed ledger commit." >&2
-            exit 1
-          fi
-
+          # tag_name is restated even though it is not changing. Leaving it out of
+          # an update has been reported to clear it, and clearing it is the same
+          # orphaning failure by another route.
           gh api \
             --method PATCH \
             --header 'Accept: application/vnd.github+json' \
             --header 'X-GitHub-Api-Version: 2026-03-10' \
             "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" \
+            -f "tag_name=${LABEL}" \
             -f "target_commitish=${GITHUB_SHA}" \
             >/dev/null
 
-          # tagCreated was already emitted at the moment of creation above, so
-          # that it survives a failure between there and here.
-          echo "tagCommitSha=$tag_commit" >> "$GITHUB_OUTPUT"
+          # Read the binding back rather than trusting the write.
+          bound_json="$(gh_retry gh api \
+            --header 'Accept: application/vnd.github+json' \
+            --header 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}")"
+          bound_tag_name="$(jq -r '.tag_name' <<<"$bound_json")"
+          bound_target="$(jq -r '.target_commitish' <<<"$bound_json")"
+          log_field "tag_name" "$bound_tag_name"
+          log_field "target_commitish" "$bound_target"
+
+          if [[ "$bound_tag_name" != "$LABEL" ]]; then
+            report_orphaned_draft "$bound_tag_name" "while binding it to the ledger commit"
+            exit 1
+          fi
+          if [[ "$bound_target" != "$GITHUB_SHA" ]]; then
+            echo "The draft is bound to $bound_target, not the reviewed ledger commit $GITHUB_SHA." >&2
+            exit 1
+          fi
+
+          # A tag may already exist from an earlier attempt. resolve-release-state
+          # has already refused unless it names this exact commit, so publication
+          # reusing it is safe -- and in that case target_commitish is ignored, by
+          # the API's own definition.
+          if [[ "$TAG_EXISTS" == "true" ]]; then
+            log_note "refs/tags/$LABEL already exists at this commit; publication will reuse it."
+          fi
+
+          log_ok "The draft is bound to $GITHUB_SHA; publication will create the tag there."
+
+          # Named tagCommitSha for the steps that consume it. Before publication
+          # there is no tag, so this is the commit the tag will be created at --
+          # which every consumer already compares against GITHUB_SHA anyway.
+          echo "tagCommitSha=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
 
         #
         # Build the GitHub attestation predicate
@@ -1040,16 +1066,61 @@ jobs:
             exit 1
           fi
 
-          # Get the tag commit
-          tag_commit="$(gh_retry gh api \
-            --header 'Accept: application/vnd.github+json' \
-            --header 'X-GitHub-Api-Version: 2026-03-10' \
-            "repos/${GITHUB_REPOSITORY}/commits/${LABEL}" \
-            --jq '.sha')"
-          if [[ "$tag_commit" != "$TAG_COMMIT_SHA" ||
-            "$tag_commit" != "$GITHUB_SHA" ]]; then
-            echo "The release tag changed before publication." >&2
+          # Re-assert the binding publication will act on.
+          #
+          # Which value that binding rests on depends on whether the tag exists
+          # already, and both cases are reachable: resolve-release-state returns
+          # mode=publish with tagExists=true whenever a tag is already present and
+          # names this commit.
+          #
+          #   no tag yet    publication creates refs/tags/<label> at
+          #                 target_commitish, so target_commitish is the binding
+          #   tag exists    publication reuses the tag and target_commitish is
+          #                 "unused if the Git tag already exists", by the API's
+          #                 own definition, so the existing ref is the binding
+          #
+          # Both are therefore checked here, neither having been re-read since the
+          # bind step: target_commitish immediately below, and the existing ref
+          # further down.
+          bound_target="$(jq -r '.target_commitish' <<<"$release_json")"
+          bound_tag_name="$(jq -r '.tag_name' <<<"$release_json")"
+          log_field "tag_name" "$bound_tag_name"
+          log_field "target_commitish" "$bound_target"
+          if [[ "$bound_tag_name" != "$LABEL" ]]; then
+            echo "The draft lost its tag_name before publication: found $bound_tag_name." >&2
             exit 1
+          fi
+          if [[ "$bound_target" != "$TAG_COMMIT_SHA" ||
+            "$bound_target" != "$GITHUB_SHA" ]]; then
+            echo "The draft is no longer bound to the reviewed ledger commit." >&2
+            echo "  expected $GITHUB_SHA, found $bound_target" >&2
+            exit 1
+          fi
+
+          # If a tag already exists it takes precedence over target_commitish,
+          # so it has to name this commit too.
+          existing_tag_lookup=0
+          gh_api_optional \
+            "repos/${GITHUB_REPOSITORY}/git/ref/tags/${LABEL}" \
+            >/dev/null || existing_tag_lookup=$?
+          if (( existing_tag_lookup == 1 )); then
+            echo "Could not determine whether tag $LABEL exists." >&2
+            exit 1
+          fi
+          if (( existing_tag_lookup == 0 )); then
+            tag_commit="$(gh_retry gh api \
+              --header 'Accept: application/vnd.github+json' \
+              --header 'X-GitHub-Api-Version: 2026-03-10' \
+              "repos/${GITHUB_REPOSITORY}/commits/${LABEL}" \
+              --jq '.sha')"
+            log_field "existing refs/tags/$LABEL" "$tag_commit"
+            if [[ "$tag_commit" != "$GITHUB_SHA" ]]; then
+              echo "An existing tag $LABEL names $tag_commit, not $GITHUB_SHA." >&2
+              echo "Publication would reuse it and bind the release to the wrong commit." >&2
+              exit 1
+            fi
+          else
+            log_note "No tag yet; publication will create refs/tags/$LABEL at $GITHUB_SHA."
           fi
 
           # Verify assets match
@@ -1291,7 +1362,6 @@ jobs:
           # via the environment.
           HANDOFF_NAME: ${{ steps.release_info.outputs.handoffName }}
           TAR_NAME: ${{ steps.release_info.outputs.tarName }}
-          TAG_CREATED: ${{ steps.tag.outputs.tagCreated }}
           JOB_STATUS: ${{ job.status }}
           GH_TOKEN: ${{ github.token }}
 
