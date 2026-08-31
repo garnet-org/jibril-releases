@@ -84,6 +84,13 @@ draft_matches="$(jq -c --arg label "$LABEL" \
 draft_count="$(jq -r 'length' <<<"$draft_matches")"
 if [[ "$draft_count" -eq 0 ]]; then
   echo "No authenticated draft release has tag_name '$LABEL'." >&2
+  echo >&2
+  echo "If a draft titled '$LABEL' exists with tag_name \"untagged-<hash>\", it" >&2
+  echo "was orphaned rather than lost. Do not delete it: re-run" >&2
+  echo "release-stage-public-draft.yaml in garnet-org/jibril for $LABEL, which" >&2
+  echo "PATCHes tag_name back, then run this workflow again." >&2
+  echo "  gh api repos/$GITHUB_REPOSITORY/releases --paginate \\" >&2
+  echo "    --jq '.[] | select(.draft) | {id, tag_name, name}'" >&2
   exit 1
 fi
 if [[ "$draft_count" -ne 1 ]]; then
@@ -127,14 +134,21 @@ if [[ "$actual_assets" != "$expected_assets" ]]; then
     <(printf '%s\n' "$expected_assets") \
     <(printf '%s\n' "$actual_assets") || true
   echo >&2
-  echo "This draft holds leftovers from an interrupted run. To recover:" >&2
-  echo "  1. Save the handoff if it is still attached, so the private repository" >&2
-  echo "     does not have to rebuild it:" >&2
-  echo "       gh release download '$LABEL' --repo '$GITHUB_REPOSITORY' --pattern '$HANDOFF_NAME'" >&2
-  echo "  2. Delete the draft and the tag this workflow may have created:" >&2
-  echo "       gh release delete '$LABEL' --repo '$GITHUB_REPOSITORY' --yes" >&2
-  echo "       gh api --method DELETE repos/$GITHUB_REPOSITORY/git/refs/tags/$LABEL" >&2
-  echo "  3. Re-stage the draft from the private release workflow, then run this again." >&2
+  echo "This draft holds leftovers from an interrupted run." >&2
+  echo >&2
+  echo "Prefer removing just the unexpected assets over deleting the draft: the" >&2
+  echo "handoff attached to it is the only copy this repository can reach, and" >&2
+  echo "the private staging workflow refuses a draft that carries assets it did" >&2
+  echo "not put there. Detach each name listed above that is not the handoff or" >&2
+  echo "its sidecar:" >&2
+  echo "  gh release delete-asset '$LABEL' <name> --repo '$GITHUB_REPOSITORY' --yes" >&2
+  echo >&2
+  echo "Then re-run release-stage-public-draft.yaml in garnet-org/jibril for" >&2
+  echo "$LABEL to restore anything missing, and run this workflow again." >&2
+  echo >&2
+  echo "Only if that fails: save the handoff first, then delete the draft." >&2
+  echo "  gh release download '$LABEL' --repo '$GITHUB_REPOSITORY' --pattern '$HANDOFF_NAME*'" >&2
+  echo "  gh release delete '$LABEL' --repo '$GITHUB_REPOSITORY' --yes" >&2
   exit 1
 fi
 

@@ -79,10 +79,15 @@ fi
 if bash "$script_dir/rollback-staging-assets.sh"; then
   echo "The original staging draft was restored."
 else
-  echo "The staging rollback failed. Recover by hand:" >&2
-  echo "  gh release download '$LABEL' --repo '$GITHUB_REPOSITORY' --pattern '$HANDOFF_NAME*'" >&2
-  echo "  gh release delete '$LABEL' --repo '$GITHUB_REPOSITORY' --yes" >&2
-  echo "Then re-stage the draft from the private release workflow." >&2
+  echo "The staging rollback failed; the draft still carries final assets." >&2
+  echo "Detach them rather than deleting the draft -- the handoff on it is the" >&2
+  echo "only copy this repository can reach, and the private staging workflow" >&2
+  echo "refuses a draft carrying assets it did not put there:" >&2
+  echo "  gh release delete-asset '$LABEL' jibril --repo '$GITHUB_REPOSITORY' --yes" >&2
+  echo "  gh release delete-asset '$LABEL' '$TAR_NAME' --repo '$GITHUB_REPOSITORY' --yes" >&2
+  echo "  gh release delete-asset '$LABEL' SHA256SUMS --repo '$GITHUB_REPOSITORY' --yes" >&2
+  echo "Then re-run release-stage-public-draft.yaml in garnet-org/jibril for" >&2
+  echo "$LABEL, and run this workflow again." >&2
 fi
 
 exit 0
