@@ -36,8 +36,8 @@ Anything that does not match these exactly is a failure, not a warning.
 | --- | --- |
 | Repository | `garnet-org/jibril-releases` |
 | Signing workflow | `garnet-org/jibril-releases/.github/workflows/jibril-public-release.yml` |
-| Attestation predicate | `https://github.com/garnet-org/jibril-releases/attestations/` |
-| Cosign identity | `https://github.com/garnet-org/jibril-releases/tree/main/.github/workflows/jibril-public-release.yml@refs/heads/main` |
+| Attestations | `https://github.com/garnet-org/jibril-releases/attestations/` |
+| Cosign identity | `https://github.com/garnet-org/jibril-releases/.github/workflows/jibril-public-release.yml@refs/heads/main` |
 | Cosign OIDC issuer | `https://token.actions.githubusercontent.com` |
 | Cosign trigger | `workflow_dispatch` |
 
