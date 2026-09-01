@@ -1206,14 +1206,11 @@ jobs:
           set -euo pipefail
 
           release_date="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
-          release_notes=$'Public Jibril release for Linux x86_64.\n\n'
+          release_notes=$'Release: '"${LABEL}"$'\n\n'
           release_notes+=$'Date: '"${release_date}"$'\n'
+          release_notes=$'Platforms: Linux x86_64\n'
           release_notes+=$'Public ledger and tag commit: '"${TAG_COMMIT_SHA}"$'\n'
-          release_notes+=$'Public signing workflow: '"${GITHUB_WORKFLOW_REF}"$'\n'
           release_notes+=$'Public signing workflow commit: '"${GITHUB_SHA}"$'\n'
-          release_notes+=$'Cosign identity: '"${EXPECTED_CERTIFICATE_IDENTITY}"$'\n'
-          release_notes+=$'Cosign issuer: '"${EXPECTED_CERTIFICATE_OIDC_ISSUER}"$'\n'
-          release_notes+=$'GitHub attestation predicate: '"${PUBLIC_PREDICATE_TYPE}"$'\n'
 
           # Check if it is a prerelease
           make_latest=true
