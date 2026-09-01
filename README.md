@@ -16,7 +16,7 @@ for further details.
 
 ## License
 
-Copyright © 2025–2026 Garnet Labs Inc.
+Copyright © 2026 Garnet Labs Inc.
 
 Released binaries are licensed under the terms in [LICENSE.md](./LICENSE.md).
-Embedded components remain subject to their respective licenses.
+Embedded components remain subject to their respective licenses. 
