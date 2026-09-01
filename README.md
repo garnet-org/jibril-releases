@@ -7,6 +7,13 @@ by Garnet Labs Inc. Binary distribution only; source is not public.
 Jibril from this repository and runs it as a systemd service on supported
 Linux runners.
 
+## Verifying a Jibril release
+
+Verifying that a Jibril release is authentic, untampered, and deterministic helps
+to harden pipelines against supply chain attacks, configuration drifts, and
+unauthorized code execution. Please check the [Verify Jibril release doc](./docs/release-verify.md)
+for further details.
+
 ## License
 
 Copyright © 2025–2026 Garnet Labs Inc.
