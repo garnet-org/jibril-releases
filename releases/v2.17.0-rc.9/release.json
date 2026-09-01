@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "release": {
+    "tag": "v2.17.0-rc.9",
+    "source_sha": "a294478ae96aee3863b9b437f640a9a03358f9b4",
+    "source_sha_date": "",
+    "platforms": [
+      "linux-x86_64"
+    ]
+  },
+  "handoff": {
+    "name": "jibril-v2.17.0-rc.9-linux-x86_64.handoff.tar.gz"
+  },
+  "subjects": [
+    {
+      "name": "jibril",
+      "sha256": "b84cb6e7fdcd4a4095a428b0f1088494dcd202b884cfb28b0aeae311a433db38"
+    },
+    {
+      "name": "jibril-checksums.txt",
+      "sha256": "4665e625c150079b4a2bda32c331188e10a20be60da9f2acfb5db7c7ff743407"
+    }
+  ]
+}
