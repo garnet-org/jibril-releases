@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "release": {
+    "tag": "v2.18.0-rc.4",
+    "source_sha": "ab5c250844308d181de5a6525fa4ec904849c9bf",
+    "source_sha_date": "",
+    "platforms": [
+      "linux-x86_64"
+    ]
+  },
+  "handoff": {
+    "name": "jibril-v2.18.0-rc.4-linux-x86_64.handoff.tar.gz"
+  },
+  "subjects": [
+    {
+      "name": "jibril",
+      "sha256": "a2a036c664107f7cac90619b1a509b1144ef4a27220f0b2dc353040e6e991fee"
+    },
+    {
+      "name": "jibril-checksums.txt",
+      "sha256": "f684265bae48fd4fc7485f35549c96b267203a7b7377e839683ccc166b4b104a"
+    }
+  ]
+}
