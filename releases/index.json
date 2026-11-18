@@ -1,6 +1,12 @@
 {
   "schemaVersion": 2,
   "releases": {
+    "v2.18.0": {
+      "platforms": [
+        "linux-x86_64"
+      ],
+      "release": "releases/v2.18.0"
+    },
     "v2.18.0-rc.4": {
       "platforms": [
         "linux-x86_64"
